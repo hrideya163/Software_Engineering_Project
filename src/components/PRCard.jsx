@@ -1,0 +1,1 @@
+import { GitPullRequest } from 'lucide-react'; export default function PRCard({pr}) { return <div className="flex gap-3 rounded-xl border border-slate-200 p-4"><GitPullRequest className="shrink-0 text-violet-600" size={20}/><div><p className="text-sm font-bold">#{pr.id} {pr.title}</p><p className="mt-1 text-xs text-slate-500">{pr.status} · @{pr.author}</p></div></div> }

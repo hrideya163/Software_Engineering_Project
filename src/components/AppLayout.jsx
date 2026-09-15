@@ -1,0 +1,1 @@
+import Navbar from './Navbar'; import Sidebar from './Sidebar'; export default function AppLayout({children}) { return <><Navbar/><div className="mx-auto flex min-h-[calc(100vh-73px)] max-w-[1600px]"><Sidebar/><main className="min-w-0 flex-1 p-5 md:p-8">{children}</main></div></> }

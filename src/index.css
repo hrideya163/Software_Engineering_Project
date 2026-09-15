@@ -1,0 +1,8 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base { body { @apply bg-[#f7f9fc] text-ink antialiased; font-family: Manrope, sans-serif; } button,input,select { font: inherit; } }
+@layer components { .card { @apply rounded-2xl border border-slate-200 bg-white shadow-soft; } .eyebrow { @apply text-xs font-bold uppercase tracking-[.16em] text-slate-500; } .btn-primary { @apply inline-flex items-center justify-center gap-2 rounded-xl bg-ink px-4 py-3 text-sm font-bold text-white transition hover:bg-[#19365f] focus:outline-none focus:ring-2 focus:ring-mint; } .btn-secondary { @apply inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold text-ink transition hover:bg-slate-50; } .mono { font-family: 'DM Mono', monospace; } }
+.react-flow__attribution { display:none }

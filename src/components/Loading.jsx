@@ -1,0 +1,1 @@
+export default function Loading({label='Loading workspace…'}) { return <div className="grid min-h-[35vh] place-items-center"><div className="text-center"><div className="mx-auto h-8 w-8 animate-spin rounded-full border-4 border-slate-200 border-t-ink"/><p className="mt-3 text-sm font-semibold text-slate-500">{label}</p></div></div> }
