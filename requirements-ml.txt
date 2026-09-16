@@ -1,0 +1,12 @@
+requests>=2.32
+pandas>=2.2
+numpy>=1.26
+scikit-learn>=1.5
+sentence-transformers>=3.0
+faiss-cpu>=1.8
+lightgbm>=4.5
+xgboost>=2.1
+joblib>=1.4
+pyarrow>=17.0
+fastapi>=0.115
+uvicorn[standard]>=0.30
