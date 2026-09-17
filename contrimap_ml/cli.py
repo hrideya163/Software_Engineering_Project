@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 
-from .github_ingest import collect_repository
+from dotenv import load_dotenv
+
+from .github_ingest import GitHubRateLimitError, collect_repository
 from .models import ContriMapModels, train_models
 
 
 def main() -> None:
+    load_dotenv()
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     parser = argparse.ArgumentParser(description="ContriMap historical ingestion and ML training")
     subparsers = parser.add_subparsers(dest="command", required=True)
     ingest = subparsers.add_parser("ingest")
@@ -26,7 +31,10 @@ def main() -> None:
     predict.add_argument("--top-k", type=int, default=10)
     args = parser.parse_args()
     if args.command == "ingest":
-        print(collect_repository(args.owner, args.repo, args.output, os.getenv("GITHUB_TOKEN"), args.max_issues))
+        try:
+            print(collect_repository(args.owner, args.repo, args.output, os.getenv("GITHUB_TOKEN"), args.max_issues))
+        except GitHubRateLimitError as error:
+            parser.exit(1, f"GitHub rate limit exceeded. {error}\n")
     elif args.command == "train":
         print(json.dumps(train_models(args.dataset, args.output), indent=2))
     else:

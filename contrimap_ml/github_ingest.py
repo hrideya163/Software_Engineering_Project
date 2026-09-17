@@ -1,23 +1,29 @@
-"""GitHub REST ingestion for historical issue -> resolving PR -> files records.
-
-The collector is intentionally API-only and stores raw responses alongside a
-normalized JSONL dataset so training can be reproduced from a dated snapshot.
-"""
-
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-import requests
+import requests  # pyright: ignore[reportMissingImports]
 
 
+logger = logging.getLogger(__name__)
 PR_REFERENCE = re.compile(r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)?\s*#(\d+)", re.I)
+
+
+class GitHubRateLimitError(RuntimeError):
+    """Raised when GitHub refuses a request because the API rate limit is exhausted."""
+
+    def __init__(self, reset_at: str | None):
+        detail = f"API rate limit exceeded; reset at {reset_at}" if reset_at else "API rate limit exceeded"
+        super().__init__(detail)
+        self.reset_at = reset_at
 
 
 @dataclass
@@ -53,21 +59,46 @@ class GitHubClient:
         self.api_url = api_url.rstrip("/")
         self.timeout = timeout
 
-    def get(self, path: str, **params: Any) -> Any:
-        response = self.session.get(f"{self.api_url}{path}", params=params, timeout=self.timeout)
+    def _request(self, url: str, **params: Any) -> requests.Response:
+        response = self.session.get(url, params=params, timeout=self.timeout)
+        remaining = response.headers.get("X-RateLimit-Remaining")
+        if response.status_code == 429 or (response.status_code == 403 and remaining == "0"):
+            reset_epoch = response.headers.get("X-RateLimit-Reset")
+            reset_at = datetime.fromtimestamp(int(reset_epoch), tz=timezone.utc).isoformat() if reset_epoch else None
+            raise GitHubRateLimitError(reset_at)
         response.raise_for_status()
+        return response
+
+    def get(self, path: str, **params: Any) -> Any:
+        response = self._request(f"{self.api_url}{path}", **params)
         return response.json()
 
-    def paginate(self, path: str, **params: Any) -> Iterable[dict[str, Any]]:
-        page = 1
+    def paginate(self, path: str, *, max_items: int | None = None, **params: Any) -> Iterable[dict[str, Any]]:
+        if max_items is not None and max_items <= 0:
+            return
+        url = f"{self.api_url}{path}"
+        request_params: dict[str, Any] = {"per_page": 100, "page": 1, **params}
+        fetched = 0
+        page = 0
         while True:
-            values = self.get(path, per_page=100, page=page, **params)
+            response = self._request(url, **request_params)
+            values = response.json()
             if not values:
                 return
-            yield from values
-            if len(values) < 100:
-                return
             page += 1
+            remaining = max_items - fetched if max_items is not None else len(values)
+            batch = values[:remaining]
+            fetched += len(batch)
+            logger.info("Fetched %d items from %s (page %d)", len(batch), path, page)
+            yield from batch
+            if max_items is not None and fetched >= max_items:
+                return
+            link_header = response.headers.get("Link", "")
+            next_link = re.search(r'<([^>]+)>[^,]*rel="next"', link_header)
+            if not next_link:
+                return
+            url = next_link.group(1)
+            request_params = {}
 
 
 def _hours(start: str | None, end: str | None) -> float:
@@ -77,14 +108,44 @@ def _hours(start: str | None, end: str | None) -> float:
                       datetime.fromisoformat(start.replace("Z", "+00:00"))).total_seconds() / 3600)
 
 
-def _difficulty(hours: float, files: int, review_comments: int) -> str:
-    """Create an observed training label; this is not used at inference time."""
-    workload = hours + files * 2 + review_comments * 0.5
-    if workload <= 8:
-        return "Easy"
-    if workload <= 32:
-        return "Medium"
-    return "Hard"
+def _workload(record: HistoricalContribution) -> float:
+    return record.effort_hours + len(record.changed_files) * 2 + record.pr_review_comments * 0.5
+
+
+def _percentile(values: list[float], percentage: float) -> float:
+    ordered = sorted(values)
+    if not ordered:
+        raise ValueError("Cannot calculate workload percentiles for an empty dataset.")
+    position = (len(ordered) - 1) * percentage / 100
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    fraction = position - lower
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+
+
+def _label_records(records: list[HistoricalContribution]) -> tuple[float | None, float | None, Counter[str]]:
+    if not records:
+        logger.info("No records collected; workload percentiles and difficulty distribution are empty.")
+        return None, None, Counter()
+    workloads = [_workload(record) for record in records]
+    p33 = _percentile(workloads, 33)
+    p66 = _percentile(workloads, 66)
+    for record, workload in zip(records, workloads):
+        if workload <= p33:
+            record.difficulty_label = "Easy"
+        elif workload <= p66:
+            record.difficulty_label = "Medium"
+        else:
+            record.difficulty_label = "Hard"
+    counts = Counter(record.difficulty_label for record in records)
+    logger.info("Workload percentiles:\nP33 = %.1f\nP66 = %.1f", p33, p66)
+    logger.info(
+        "Difficulty distribution:\nEasy   = %d (%.1f%%)\nMedium = %d (%.1f%%)\nHard   = %d (%.1f%%)",
+        counts["Easy"], counts["Easy"] / len(records) * 100,
+        counts["Medium"], counts["Medium"] / len(records) * 100,
+        counts["Hard"], counts["Hard"] / len(records) * 100,
+    )
+    return p33, p66, counts
 
 
 def _linked_issue_numbers(pr: dict[str, Any]) -> set[int]:
@@ -103,12 +164,23 @@ def collect_repository(
     """Collect closed issues, merged PRs and changed files into JSONL."""
     client = GitHubClient(token)
     repository = f"{owner}/{repo}"
-    issues = list(client.paginate(f"/repos/{repository}/issues", state="closed", sort="created", direction="asc"))
-    issues = [issue for issue in issues if "pull_request" not in issue]
-    if max_issues:
-        issues = issues[:max_issues]
+    issues: list[dict[str, Any]] = []
+    for issue in client.paginate(f"/repos/{repository}/issues", state="closed", sort="created", direction="asc"):
+        if "pull_request" in issue:
+            continue
+        issues.append(issue)
+        if max_issues is not None and len(issues) >= max_issues:
+            break
+    logger.info("Collected %d closed issues for %s", len(issues), repository)
     issue_by_number = {issue["number"]: issue for issue in issues}
-    pull_requests = list(client.paginate(f"/repos/{repository}/pulls", state="closed", sort="created", direction="asc"))
+    pull_requests = list(client.paginate(
+        f"/repos/{repository}/pulls",
+        max_items=max_issues,
+        state="closed",
+        sort="created",
+        direction="asc",
+    ))
+    logger.info("Collected %d closed pull requests for %s", len(pull_requests), repository)
     records: list[HistoricalContribution] = []
     raw_dir = Path(output_dir) / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -145,12 +217,13 @@ def collect_repository(
                 pr_deletions=int(pr.get("deletions", 0)),
                 changed_files=files,
                 effort_hours=effort,
-                difficulty_label=_difficulty(effort, len(files), len(reviews)),
+                difficulty_label="",
             )
             records.append(record)
             if sleep_seconds:
                 time.sleep(sleep_seconds)
 
+    p33, p66, counts = _label_records(records)
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     dataset = output / "historical_contributions.jsonl"
@@ -163,6 +236,8 @@ def collect_repository(
         "records": len(records),
         "source": "GitHub REST API",
         "label_note": "Difficulty labels are observed training labels from elapsed time, files, and review comments.",
+        "workload_percentiles": {"p33": p33, "p66": p66},
+        "difficulty_distribution": dict(counts),
     }
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return dataset

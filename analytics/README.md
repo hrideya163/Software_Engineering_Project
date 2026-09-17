@@ -45,8 +45,8 @@ issue-time features to those labels.
 
 ### 1. Issue Difficulty Classification
 
-* Inputs: issue label count, title length, body length.
-* Model: LightGBM classifier, with XGBoost fallback.
+* Inputs: MiniLM issue-title/body embedding plus issue label count, title/body lengths, and graph/repository-derived centrality features.
+* Model: LightGBM classifier, with XGBoost fallback, trained on the combined issue embedding + graph feature vector.
 * Output: `Easy`, `Medium`, or `Hard` plus class probability.
 * Metrics: accuracy and macro-F1 on a chronological holdout.
 
@@ -64,9 +64,9 @@ No post-resolution PR fields are used as model inputs, preventing leakage.
 * File corpus: all changed files in the historical dataset.
 * Encoder: `sentence-transformers/all-MiniLM-L6-v2`.
 * Index: FAISS inner-product index over normalized embeddings.
-* Query: issue title and body.
+* Query: issue title and body, re-ranked by embedding similarity + historical issue-file linkage + graph centrality.
 * Output: top-K files and similarity scores.
-* Evaluation: Recall@K and MRR against held-out resolving-PR files.
+* Evaluation: Recall@5, Recall@10, and MRR against held-out resolving-PR files.
 
 The artifact index is built from the complete historical file vocabulary for
 inference. Evaluation uses a train-only file index, so held-out issues cannot
@@ -117,3 +117,17 @@ same repository because that leaks file names, issue vocabulary, and project
 history. Report class distribution, accuracy, macro-F1, MAE, RMSE, Recall@1,
 Recall@5, Recall@10, MRR, and the number of usable linked records. Keep the
 dataset manifest and artifact metadata with every training run.
+
+
+## Repository-understanding pipeline
+
+The repository-understanding pipeline is an additive layer around the ML ingestion stack:
+
+- `RepositorySnapshot` normalizes raw GitHub payloads and local repository file trees into a single snapshot shape.
+- `NormalizedMiningRecord` turns that snapshot into the canonical mining representation consumed by ranking and graph features.
+- `build_knowledge_graph()` + `save_knowledge_graph()` persist a NetworkX repository graph as JSON for downstream analytics.
+- `graph_aware_features()` adds graph centrality values to the tabular feature vector without replacing the legacy issue-time feature set.
+- `rank_repository_items()` ranks likely contributors, files, and issues against a query.
+- `generate_explanation()` summarizes why a difficulty or localization prediction was generated.
+
+These utilities are intentionally designed to coexist with the historical `ingest`, `train`, and `predict` commands used in `contrimap_ml.cli`.
