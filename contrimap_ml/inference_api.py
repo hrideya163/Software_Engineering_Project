@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from .models import ContriMapModels
+from .inference import GitHubInferenceError, analyzeIssue, fetchRepositoryIssues, load_models
 
 
 class PredictionRequest(BaseModel):
@@ -32,9 +32,9 @@ class PredictionResponse(BaseModel):
     files: list[FilePrediction]
 
 
-ARTIFACT_DIR = Path(os.getenv("CONTRIMAP_ARTIFACT_DIR", "artifacts"))
+ARTIFACT_DIR = Path(os.getenv("CONTRIMAP_ARTIFACT_DIR", Path(__file__).resolve().parent.parent / "artifacts"))
 MODEL_VERSION = os.getenv("CONTRIMAP_MODEL_VERSION", ARTIFACT_DIR.name)
-models = ContriMapModels.load(ARTIFACT_DIR)
+models = load_models()
 app = FastAPI(title="ContriMap ML Inference API", version=MODEL_VERSION)
 app.add_middleware(
     CORSMiddleware,
@@ -56,3 +56,27 @@ def predict(request: PredictionRequest) -> PredictionResponse:
     except (ValueError, RuntimeError, OSError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     return PredictionResponse(model_version=MODEL_VERSION, **result)
+
+
+class RepositoryRequest(BaseModel):
+    repository_url: str = Field(alias="repositoryUrl")
+
+
+class IssueRequest(RepositoryRequest):
+    issue: dict[str, object]
+
+
+@app.post("/api/repositories/issues")
+def repository_issues(request: RepositoryRequest) -> list[dict[str, object]]:
+    try:
+        return fetchRepositoryIssues(request.repository_url)
+    except (GitHubInferenceError, ValueError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.post("/api/analyze")
+def analyze(request: IssueRequest) -> dict[str, object]:
+    try:
+        return analyzeIssue(request.repository_url, request.issue)
+    except (GitHubInferenceError, ValueError, RuntimeError, OSError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error

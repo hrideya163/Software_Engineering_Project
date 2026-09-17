@@ -2,6 +2,7 @@
 
 from .explanation import generate_explanation
 from .graph_features import GRAPH_FEATURE_COLUMNS, graph_aware_features
+from .inference import GitHubInferenceError, analyzeIssue, fetchRepositoryIssues, load_models
 from .knowledge_graph import build_knowledge_graph, load_knowledge_graph, save_knowledge_graph
 from .mining import NormalizedMiningRecord, normalize_record, normalize_snapshot
 from .models import ContriMapModels, train_models
@@ -17,7 +18,11 @@ __all__ = [
     "build_snapshot",
     "build_snapshot_from_directory",
     "generate_explanation",
+    "GitHubInferenceError",
+    "analyzeIssue",
+    "fetchRepositoryIssues",
     "graph_aware_features",
+    "load_models",
     "load_knowledge_graph",
     "load_snapshot",
     "normalize_record",
