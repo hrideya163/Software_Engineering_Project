@@ -3,3 +3,5 @@ dist/
 .env
 data/
 artifacts/
+.venv-ml/
+*.log

@@ -1,4 +1,5 @@
-import { createContext, useContext, useState } from 'react'
+import { createContext, useContext, useEffect, useState } from 'react'
+import { getCurrentUser } from '../api/authApi'
 const AppContext = createContext()
-export function AppProvider({ children }) { const [currentRepository, setCurrentRepository] = useState(null); const [issues, setIssues] = useState([]); const [loading, setLoading] = useState(false); const [error, setError] = useState(''); const value = { currentRepository, setCurrentRepository, issues, setIssues, loading, setLoading, error, setError }; return <AppContext.Provider value={value}>{children}</AppContext.Provider> }
+export function AppProvider({ children }) { const [currentRepository, setCurrentRepository] = useState(null); const [issues, setIssues] = useState([]); const [loading, setLoading] = useState(false); const [error, setError] = useState(''); const [user, setUser] = useState(null); const [authProviders, setAuthProviders] = useState({ github: false, google: false }); useEffect(() => { getCurrentUser().then(({ user, providers }) => { setUser(user); setAuthProviders(providers || { github: false, google: false }) }).catch(() => {}); if (window.location.search.includes('login=')) window.history.replaceState({}, '', window.location.pathname) }, []); const value = { currentRepository, setCurrentRepository, issues, setIssues, loading, setLoading, error, setError, user, setUser, authProviders }; return <AppContext.Provider value={value}>{children}</AppContext.Provider> }
 export const useApp = () => useContext(AppContext)

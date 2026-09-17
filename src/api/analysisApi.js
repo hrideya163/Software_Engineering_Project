@@ -1,5 +1,5 @@
-import { request, usingMockData } from './api'; import { analysis, graph } from './mockData'
-export const predictIssue = (issue) => usingMockData
+import { mlRequest, request, usingMockData, usingMockModel } from './api'; import { analysis, graph } from './mockData'
+export const predictIssue = (issue) => usingMockModel
   ? Promise.resolve({
       model_version: 'mock',
       difficulty: ({ Beginner: 'Easy', Intermediate: 'Medium', Advanced: 'Hard' })[issue.difficulty] || issue.difficulty || 'Medium',
@@ -7,7 +7,7 @@ export const predictIssue = (issue) => usingMockData
       effort_hours: Number.parseFloat(issue.effort) || 0,
       files: [],
     })
-  : request('/predict', {
+  : mlRequest('/api/predict', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title: issue.title, body: issue.body || issue.summary || '', labels: issue.labels || [], top_k: 10 }),
