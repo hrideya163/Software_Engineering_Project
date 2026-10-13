@@ -36,3 +36,31 @@ export async function getRawIssue(owner, repo, number) {
     githubGet(`/repos/${owner}/${repo}/issues/${number}`)
   )
 }
+
+function mapTopIssue(issue) {
+  return {
+    number: issue.number,
+    title: issue.title,
+    body: (issue.body || '').slice(0, 4000),
+    comments: issue.comments,
+    labels: issue.labels.map((l) => (typeof l === 'string' ? l : l.name)),
+    created_at: issue.created_at,
+    updated_at: issue.updated_at,
+    html_url: issue.html_url,
+    author: issue.user?.login || null
+  }
+}
+
+// "Top issues" are defined two ways for now: most commented, and newest.
+export async function listTopIssues(owner, repo, { limit = 6 } = {}) {
+  return cached(`top-issues:${owner}/${repo}:${limit}`, TTL, async () => {
+    const base = `/repos/${owner}/${repo}/issues?state=open&per_page=50&direction=desc`
+    const [byComments, byCreated] = await Promise.all([
+      githubGet(`${base}&sort=comments`),
+      githubGet(`${base}&sort=created`)
+    ])
+    // The issues endpoint also returns pull requests; drop them.
+    const pick = (raw) => raw.filter((i) => !i.pull_request).slice(0, limit).map(mapTopIssue)
+    return { mostCommented: pick(byComments), newest: pick(byCreated) }
+  })
+}

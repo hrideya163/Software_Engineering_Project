@@ -1,5 +1,5 @@
 import { ExternalLink, FileCode2 } from 'lucide-react'
-import { useParams } from 'react-router-dom'
+import { useLocation, useParams } from 'react-router-dom'
 import AppLayout from '../components/AppLayout'
 import DifficultyBadge from '../components/DifficultyBadge'
 import Loading from '../components/Loading'
@@ -10,7 +10,9 @@ import { useEffect, useState } from 'react'
 export default function IssueAnalysis() {
   const { owner, repo, issueId } = useParams()
   const { issues, loading: issuesLoading, error: repositoryError, repositoryUrl } = useRepository(owner, repo)
-  const issue = issues.find(item => String(item.number) === issueId)
+  const location = useLocation()
+  // The issue may arrive via router state (from a Top issues card) when it is not in the fetched list.
+  const issue = issues.find(item => String(item.number) === issueId) || location.state?.issue
   const [model, setModel] = useState(null)
   const [analysisLoading, setAnalysisLoading] = useState(false)
   const [error, setError] = useState('')

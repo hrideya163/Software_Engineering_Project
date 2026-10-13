@@ -1,10 +1,20 @@
 import { Router } from 'express'
 import { getRepository } from '../services/repositoryService.js'
-import { listIssues } from '../services/issueService.js'
+import { listIssues, listTopIssues } from '../services/issueService.js'
+import { getTrending } from '../services/trendingService.js'
 import { getAnalysis } from '../services/analysisService.js'
 import { getGraph } from '../services/graphService.js'
 
 const router = Router()
+
+router.get('/trending', async (req, res, next) => {
+  try {
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 12, 1), 24)
+    res.json(await getTrending({ language: req.query.language, limit }))
+  } catch (err) {
+    next(err)
+  }
+})
 
 router.get('/:owner/:repo', async (req, res, next) => {
   try {
@@ -17,6 +27,15 @@ router.get('/:owner/:repo', async (req, res, next) => {
 router.get('/:owner/:repo/issues', async (req, res, next) => {
   try {
     res.json(await listIssues(req.params.owner, req.params.repo))
+  } catch (err) {
+    next(err)
+  }
+})
+
+router.get('/:owner/:repo/top-issues', async (req, res, next) => {
+  try {
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 6, 1), 20)
+    res.json(await listTopIssues(req.params.owner, req.params.repo, { limit }))
   } catch (err) {
     next(err)
   }

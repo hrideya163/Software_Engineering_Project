@@ -7,3 +7,19 @@ export const issues = [
 ]
 export const analysis = { reason: 'The change is scoped to three well-tested files. It uses existing error boundaries and has a clear acceptance criterion.', files: ['Router.js', 'ErrorHandler.js', 'Router.test.js'], modules: ['Client router', 'Error boundary'], dependency: 'No public API changes', ai: 'This issue is a strong first contribution because the fix stays within the client router. Start by tracing how navigation errors reach the error boundary, then add a focused regression test before changing the message.', similarIssues: ['#1751: Preserve navigation errors', '#1664: Router transition warning'], prs: [{ id: '1721', title: 'Handle cancelled transitions consistently', status: 'Merged', author: 'maria-dev' }, { id: '1698', title: 'Add router error regression tests', status: 'Merged', author: 'lee-code' }] }
 export const graph = { nodes: [{ id:'issue', position:{x:20,y:160}, data:{label:'Issue #1842'}, type:'issue' }, { id:'router', position:{x:260,y:75}, data:{label:'Router.js'}, type:'file' }, { id:'error', position:{x:260,y:245}, data:{label:'ErrorHandler.js'}, type:'file' }, { id:'react', position:{x:500,y:75}, data:{label:'React Router'}, type:'tech' }, { id:'test', position:{x:510,y:245}, data:{label:'Router.test.js'}, type:'file' }, { id:'pr', position:{x:740,y:160}, data:{label:'PR #1721'}, type:'pr' }], edges: [{id:'e1',source:'issue',target:'router'},{id:'e2',source:'issue',target:'error'},{id:'e3',source:'router',target:'react'},{id:'e4',source:'error',target:'test'},{id:'e5',source:'test',target:'pr'}] }
+export const trending = [
+  { owner: 'vercel', name: 'next.js', full_name: 'vercel/next.js', description: 'The React Framework for the Web.', stars: 132400, forks: 28400, open_issues: 2900, language: 'JavaScript', topics: ['react', 'nextjs'], pushed_at: new Date().toISOString() },
+  { owner: 'facebook', name: 'react', full_name: 'facebook/react', description: 'The library for web and native user interfaces.', stars: 240000, forks: 49000, open_issues: 900, language: 'JavaScript', topics: ['react', 'ui'], pushed_at: new Date().toISOString() },
+  { owner: 'microsoft', name: 'vscode', full_name: 'microsoft/vscode', description: 'Visual Studio Code.', stars: 170000, forks: 30000, open_issues: 5000, language: 'TypeScript', topics: ['editor'], pushed_at: new Date().toISOString() },
+  { owner: 'denoland', name: 'deno', full_name: 'denoland/deno', description: 'A modern runtime for JavaScript and TypeScript.', stars: 99000, forks: 5400, open_issues: 1900, language: 'Rust', topics: ['runtime'], pushed_at: new Date().toISOString() },
+]
+export const topIssues = {
+  mostCommented: [
+    { number: 1842, title: 'Improve Router error handling', body: 'Make client-side navigation failures easier to understand and test.', comments: 42, labels: ['good first issue', 'router'], created_at: '2026-08-01T10:00:00Z' },
+    { number: 1819, title: 'Document cache invalidation behaviour', body: 'Clarify cache invalidation examples in the app router documentation.', comments: 31, labels: ['documentation'], created_at: '2026-09-02T10:00:00Z' },
+  ],
+  newest: [
+    { number: 1901, title: 'Add keyboard navigation to image gallery', body: 'Support a complete keyboard experience for the gallery component.', comments: 2, labels: ['accessibility'], created_at: '2026-10-12T10:00:00Z' },
+    { number: 1899, title: 'Optimize development compilation cache', body: 'Reduce cold-start compilation time in development.', comments: 0, labels: ['performance'], created_at: '2026-10-11T10:00:00Z' },
+  ],
+}
