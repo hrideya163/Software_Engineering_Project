@@ -14,7 +14,8 @@ import requests  # pyright: ignore[reportMissingImports]
 
 
 logger = logging.getLogger(__name__)
-PR_REFERENCE = re.compile(r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)?\s*#(\d+)", re.I)
+# The closing keyword is mandatory: a bare "#12" (e.g. "ref #12") is a mention, not a resolution.
+PR_REFERENCE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b[:\s]+#(\d+)", re.I)
 
 
 class GitHubRateLimitError(RuntimeError):
@@ -196,6 +197,8 @@ def collect_repository(
             issue = issue_by_number[issue_number]
             files = [item["filename"] for item in client.paginate(f"/repos/{repository}/pulls/{pr['number']}/files")]
             reviews = client.get(f"/repos/{repository}/pulls/{pr['number']}/reviews")
+            # The list endpoint omits commits/additions/deletions; they were silently recorded as 0.
+            detail = client.get(f"/repos/{repository}/pulls/{pr['number']}")
             effort = _hours(issue.get("created_at"), pr.get("merged_at"))
             record = HistoricalContribution(
                 repository=repository,
@@ -212,9 +215,9 @@ def collect_repository(
                 pr_merged_at=pr["merged_at"],
                 pr_closed_at=pr.get("closed_at") or "",
                 pr_review_comments=len(reviews),
-                pr_commits=int(pr.get("commits", 0)),
-                pr_additions=int(pr.get("additions", 0)),
-                pr_deletions=int(pr.get("deletions", 0)),
+                pr_commits=int(detail.get("commits", 0)),
+                pr_additions=int(detail.get("additions", 0)),
+                pr_deletions=int(detail.get("deletions", 0)),
                 changed_files=files,
                 effort_hours=effort,
                 difficulty_label="",

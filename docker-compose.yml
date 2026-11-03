@@ -1,0 +1,22 @@
+# docker compose up --build
+#   app  -> http://localhost:8001  (frontend + FastAPI)
+#   auth -> http://localhost:8000  (optional Express GitHub/Google sign-in)
+services:
+  app:
+    build: .
+    ports: ["8001:8001"]
+    env_file: [.env]
+    environment:
+      CONTRIMAP_ALLOWED_ORIGINS: http://localhost:8001
+    volumes:
+      - contrimap-cache:/app/data   # git trees, snapshots, embedding cache
+  auth:
+    image: node:20-slim
+    working_dir: /srv
+    command: sh -c "npm ci && node src/index.js"
+    volumes: ["./server:/srv"]
+    env_file: [server/.env]
+    ports: ["8000:8000"]
+    profiles: [auth]
+volumes:
+  contrimap-cache:

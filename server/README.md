@@ -5,6 +5,12 @@ from the GitHub REST API, plus heuristic scoring (difficulty, skill match,
 effort, impact) layered on top since there's no real user skill profile or
 ML model behind this.
 
+> **Note (v2):** the frontend now uses this server only for GitHub / Google
+> sign-in (`/api/auth/*`). Repositories, issues, model predictions, the
+> visualizer and recommendations are served by the FastAPI backend in
+> `contrimap_ml/api.py` (see the root README). The `/api/repositories/*`
+> heuristic routes below remain for backward compatibility.
+
 ## Setup
 
 ```bash

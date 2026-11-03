@@ -1,5 +1,7 @@
 const BASE_URL = import.meta.env.VITE_API_URL
-const ML_BASE_URL = import.meta.env.VITE_ML_API_URL
+// The FastAPI backend (contrimap_ml/api.py). Defaults to the local dev server.
+// Production builds without VITE_ML_API_URL assume the API is served from the same origin (Docker image).
+const ML_BASE_URL = import.meta.env.VITE_ML_API_URL || (import.meta.env.DEV ? 'http://localhost:8001' : window.location.origin)
 
 async function send(baseUrl, path, options = {}) {
   const response = await fetch(`${baseUrl}${path}`, {

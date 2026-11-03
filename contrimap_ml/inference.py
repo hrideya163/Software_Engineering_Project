@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 import requests
 
+from .features import is_valid_candidate
 from .models import ContriMapModels
 from .snapshot import RepositorySnapshot, build_snapshot
 
@@ -104,6 +105,9 @@ def _repository_snapshot(session: requests.Session, repository: str, issues: lis
     for item in tree.get("tree") or []:
         if item.get("type") != "blob" or not item.get("path") or item.get("size", 0) > 1_000_000:
             continue
+        # Apply candidate filtering to exclude node_modules, lockfiles, etc.
+        if not is_valid_candidate(item["path"]):
+            continue
         files.append({"path": item["path"]})
     return build_snapshot({
         "repository": {"owner": repository.split("/", 1)[0], "name": repository.split("/", 1)[1], "full_name": repository},
@@ -137,7 +141,9 @@ def analyzeIssue(repositoryUrl: str, issue: dict[str, Any]) -> dict[str, Any]:
     return {
         "difficulty": prediction["difficulty"],
         "difficulty_probability": float(prediction["difficulty_probability"]),
+        "confidence": prediction.get("confidence", "medium"),
         "effort_hours": float(prediction["effort_hours"]),
+        "effort_note": prediction.get("effort_note", ""),
         "affected_files": [
             {"path": item["path"], "similarity": float(item["similarity"])}
             for item in prediction.get("files", [])

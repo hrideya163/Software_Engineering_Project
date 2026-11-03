@@ -142,10 +142,16 @@ def build_snapshot(input_data: Mapping[str, Any] | None = None) -> RepositorySna
 
 
 def build_snapshot_from_directory(directory: str | Path) -> RepositorySnapshot:
+    from .features import is_valid_candidate
+
     root = Path(directory)
     files: list[dict[str, Any]] = []
     for path in sorted(root.rglob("*")):
         if path.is_dir() or path.name.startswith("."):
+            continue
+        # Skip vendored/build trees (node_modules, dist, .git, ...): the legacy
+        # walker included them and produced 400 MB snapshots of dependencies.
+        if not is_valid_candidate(path.relative_to(root).as_posix()) or path.stat().st_size > 1_000_000:
             continue
         try:
             content = path.read_text(encoding="utf-8")
@@ -174,8 +180,77 @@ def load_snapshot(path: str | Path) -> RepositorySnapshot:
 
 __all__ = [
     "RepositorySnapshot",
+    "build_git_snapshot",
     "build_snapshot",
     "build_snapshot_from_directory",
     "save_snapshot",
     "load_snapshot",
 ]
+
+
+# ---------------------------------------------------------------------------
+# v2: point-in-time snapshots of GitHub repositories via git (no API token)
+# ---------------------------------------------------------------------------
+SNAPSHOT_DIR = Path(__file__).resolve().parent.parent / "data" / "snapshots"
+SNAPSHOT_VERSION = 2
+
+
+def build_git_snapshot(repo: str, sha: str | None = None, content_limit: int = 1500, priority: Iterable[str] = (), cache_dir: Path = SNAPSHOT_DIR) -> dict[str, Any]:
+    """Snapshot ``owner/name`` at ``sha`` (default branch HEAD): files, imports, tests, stack, skills.
+
+    Cached per commit under ``data/snapshots``; a snapshot is immutable for its sha.
+    """
+    from .codegraph import import_edges, is_manifest, select_content_paths, test_edges
+    from .features import is_valid_candidate as _valid
+    from .repo_trees import fetch_blobs, fetch_tree
+    from .skills import as_public, extract_repository_skills
+
+    resolved, all_files = fetch_tree(repo, sha)
+    target = cache_dir / repo.replace("/", "__") / f"{resolved}.json"
+    if target.exists():
+        cached = json.loads(target.read_text(encoding="utf-8"))
+        if cached.get("version") == SNAPSHOT_VERSION:
+            return cached
+    files = [path for path in all_files if _valid(path)]
+    wanted = select_content_paths(files, limit=content_limit, priority=priority)
+    contents = fetch_blobs(repo, resolved, wanted)
+    imports = import_edges(files, contents)
+    manifests = {path: content for path, content in contents.items() if is_manifest(path)}
+    packages = sorted(_dependency_packages([{"content": content} for path, content in manifests.items() if path.endswith((".json", ".txt"))]) + _toml_like_packages(manifests))
+    skills = extract_repository_skills(files, manifests)
+    snapshot = {
+        "version": SNAPSHOT_VERSION,
+        "full_name": repo,
+        "sha": resolved,
+        "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+        "files": files,
+        "file_count": len(files),
+        "parsed_files": len(contents),
+        "tests": [path for path in files if TEST_PATTERN.search(path)],
+        "documentation": [path for path in files if DOC_PATTERN.search(path)],
+        "manifests": sorted(manifests),
+        "packages": sorted(set(packages))[:300],
+        "import_edges": imports,
+        "test_edges": test_edges(files, imports),
+        "skills": as_public(skills, limit=20),
+        "contributing": next((path for path in files if re.search(r"(^|/)CONTRIBUTING(\.md|\.rst)?$", path, re.I)), None),
+        "readme": next((path for path in files if re.fullmatch(r"README(\.\w+)?", path, re.I)), None),
+    }
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(snapshot), encoding="utf-8")
+    return snapshot
+
+
+def _toml_like_packages(manifests: Mapping[str, str]) -> list[str]:
+    packages: set[str] = set()
+    for path, content in manifests.items():
+        name = Path(path).name
+        if name == "go.mod":
+            packages.update(re.findall(r"^\s*(?:require\s+)?([\w.-]+\.[\w.-]+/[\w./-]+)\s+v", content, re.M))
+        elif name in {"pyproject.toml", "setup.cfg", "Pipfile"}:
+            for block in re.findall(r"(?:dependencies|requires|install_requires)\s*=\s*\[([^\]]*)\]", content, re.S):
+                packages.update(re.findall(r"[\"']([A-Za-z0-9_.-]+)", block))
+        elif name == "Cargo.toml":
+            for block in re.findall(r"\[(?:dev-)?dependencies\]([^\[]*)", content, re.S):
+                packages.update(re.findall(r"^\s*([\w-]+)\s*=", block, re.M))
+    return sorted(packages)
