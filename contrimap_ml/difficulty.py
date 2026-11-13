@@ -3,7 +3,7 @@
 Labels
 ------
 * **Difficulty** (Easy / Medium / Hard) is a proxy computed from the size of the
-  gold fix: ``log1p(LOC) + log1p(files) + 0.5 * log1p(hunks)`` over non-test
+  gold fix: ``log1p(LOC) + log1p(files)`` over non-test
   files, split at the training-set tertiles.  The proxy was pre-registered and
   checked against SWE-bench Verified's human annotations (Spearman 0.52).
   Thresholds are fitted on the training repositories only.
@@ -43,7 +43,9 @@ EFFORT_LEVELS = ["<15 min", "15 min - 1 hour", "1-4 hours", ">4 hours"]
 
 
 def change_scale(frame: pd.DataFrame) -> pd.Series:
-    return np.log1p(frame.loc_changed) + np.log1p(frame.n_files) + 0.5 * np.log1p(frame.n_hunks)
+    # Hunks were dropped from the v1 definition: LOC + files alone correlates with human time-to-fix
+    # just as well (Spearman 0.525 vs 0.524) and is available for GraphQL-ingested PRs.
+    return np.log1p(frame.loc_changed) + np.log1p(frame.n_files)
 
 
 def handcrafted_matrix(frame: pd.DataFrame) -> np.ndarray:
@@ -177,7 +179,7 @@ def _baselines(train_labels: np.ndarray, frame: pd.DataFrame, truth: np.ndarray,
 
 def train_difficulty(corpus: pd.DataFrame, embeddings: np.ndarray, seed: int = 42) -> tuple[DifficultyModel, dict[str, Any]]:
     """Fit on SWE-bench train repositories; evaluate on unseen repositories and languages."""
-    sized = corpus.loc_changed.notna().to_numpy()
+    sized = (corpus.loc_changed.notna() & corpus.n_files.notna()).to_numpy()
     scale_all = change_scale(corpus).to_numpy()
     train_mask = sized & (corpus.eval_group == "train").to_numpy()
     thresholds = list(np.quantile(scale_all[train_mask], [1 / 3, 2 / 3]))
@@ -207,7 +209,7 @@ def train_difficulty(corpus: pd.DataFrame, embeddings: np.ndarray, seed: int = 4
     model = _fit_components(train, train_hand, train_emb, y, size_target, best_blend, thresholds)
     model.metadata = {"cv_macro_f1_by_blend": cv, "train_records": int(len(train)), "train_repositories": int(train.repo.nunique()), "thresholds": thresholds}
 
-    metrics: dict[str, Any] = {"label_definition": "tertiles of log1p(LOC)+log1p(files)+0.5*log1p(hunks) on train repositories", "thresholds": thresholds, "grouped_cv_macro_f1": cv, "selected_linear_blend": best_blend}
+    metrics: dict[str, Any] = {"label_definition": "tertiles of log1p(LOC)+log1p(files) of non-test changes on train repositories", "thresholds": thresholds, "grouped_cv_macro_f1": cv, "selected_linear_blend": best_blend}
     for group in ("dev", "test", "multilingual"):
         mask = sized & (corpus.eval_group == group).to_numpy()
         if not mask.any():

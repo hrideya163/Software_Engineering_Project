@@ -317,3 +317,27 @@ def test_api_routes_with_mocked_service(monkeypatch):
     merged = client.post("/api/recommendations", json={"profile": {"tech_stack": ["Go"]}, "repositories": ["a/b", "c/d"]}).json()
     assert len(merged["issues"]) == 2 and merged["issues"][0]["rank"] == 1
     assert client.post("/api/skills/extract", json={"text": "Rust tokio runtime panics"}).json()["skills"]
+
+
+def test_changelogs_are_not_localization_candidates():
+    from contrimap_ml.localization import is_changelog
+
+    assert is_changelog("CHANGES.md") and is_changelog("docs/CHANGELOG.rst") and is_changelog("changelog.d/123.bugfix")
+    assert not is_changelog("src/changes_handler.py")
+    assert localization_candidates(["CHANGES.md", "src/app.py"]) == ["src/app.py"]
+
+
+def test_issue_outcome_ingestion_with_fake_transport(tmp_path):
+    from contrimap_ml.ingest import ingest_issue_outcomes, load_issue_outcomes
+
+    def transport(query, variables):
+        return {"search": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": [
+            {"number": 1, "title": "Crash", "body": "x", "createdAt": "2024-01-01T00:00:00Z", "closedAt": None, "stateReason": "COMPLETED",
+             "labels": {"nodes": [{"name": "bug"}]}, "closedByPullRequestsReferences": {"nodes": [{"merged": True}]}},
+            {"number": 2, "title": "Question?", "body": "", "createdAt": "2024-01-02T00:00:00Z", "closedAt": None, "stateReason": "NOT_PLANNED",
+             "labels": {"nodes": []}, "closedByPullRequestsReferences": {"nodes": []}},
+        ]}}
+
+    ingest_issue_outcomes("acme/tool", transport, output=tmp_path)
+    rows = load_issue_outcomes(tmp_path)
+    assert [row["resolved_by_merged_pr"] for row in rows] == [True, False] and rows[0]["labels"] == ["bug"]

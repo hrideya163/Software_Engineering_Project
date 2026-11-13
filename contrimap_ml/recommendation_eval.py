@@ -31,6 +31,17 @@ ROOT = Path(__file__).resolve().parent.parent
 COMPONENTS = ["skill", "files", "semantic", "success", "difficulty_fit"]
 
 
+_SUCCESS_CACHE: list = []
+
+
+def _temporal_success_model():
+    from .success import train_success_model
+
+    if not _SUCCESS_CACHE:
+        _SUCCESS_CACHE.append(train_success_model()[0])
+    return _SUCCESS_CACHE[0]
+
+
 def _metrics(ranks: list[int | None]) -> dict[str, float]:
     n = max(len(ranks), 1)
     return {
@@ -69,7 +80,9 @@ def _prepare(corpus: pd.DataFrame, embeddings: np.ndarray, artifacts: Path, prof
 
     localizer = joblib.load(artifacts / "localization.joblib")
     difficulty = joblib.load(artifacts / "difficulty.joblib")
-    success = joblib.load(artifacts / "success.joblib") if (artifacts / "success.joblib").exists() else None
+    # The deployed success model is trained on *all* next.js PRs, including this evaluation window;
+    # use the temporal model (first 80% of next.js PRs) so the component cannot leak.
+    success = _temporal_success_model()
     history = RepoHistory.build((history_frame.created_at.astype("int64") // 10**9).tolist(), embeddings[history_frame.emb_row.to_numpy()], [list(t) for t in history_frame.target_files])
     candidates = sorted({path for files in history_frame.target_files for path in files})
     cache = PathFeatureCache(embed)

@@ -73,6 +73,13 @@ def render(report: dict[str, Any], legacy: dict[str, Any] | None = None) -> str:
         out += ["## Issue ranking - actionability component", "", f"{action['dataset']}; temporal split (train {action['train']}, test {action['test']}, positive rate {_f(action['test_positive_rate'])}).", "",
                 _table(["Model", "ROC-AUC", "Average precision"], [["**ContriMap**", action["roc_auc"], action["average_precision"]], ["keyword heuristic", action["baseline_heuristic_auc"], action["baseline_heuristic_ap"]], ["body length", action["baseline_body_length_auc"], None], ["random", 0.5, action["baseline_random_ap"]]]), "",
                 f"Precision@50: {_f(action['precision_at_50'])}. {action['caveat']} The other ranking components (availability, freshness, clarity, community, focus) are transparent rules, not learned, and are not separately evaluated.", ""]
+    multi_action = report.get("actionability_multirepo")
+    if multi_action:
+        best = multi_action["selected"]
+        rows = [[repo, info["n"], info["positive_rate"], multi_action["per_repository_auc"][best][repo], multi_action["per_repository_auc"]["heuristic"][repo]] for repo, info in multi_action["repositories"].items()]
+        rows.append(["**mean**", None, None, multi_action["mean_auc"][best], multi_action["mean_auc"]["heuristic"]])
+        out += ["### Actionability across repositories (deployed model)", "", f"{multi_action['evaluation']}; selected **{best}** (mean AUC by candidate: {', '.join(f'{k} {v:.3f}' for k, v in multi_action['mean_auc'].items())}).", "",
+                _table(["Held-out repository", "Issues", "Positive rate", "Model AUC", "Heuristic AUC"], rows), "", multi_action["caveat"], ""]
     success = report.get("success")
     if success:
         out += ["## Contribution success prediction", "", f"{success['dataset']} (train {success['train']}, test {success['test']}, merge rate {_f(success['test_merge_rate'])}).", "",

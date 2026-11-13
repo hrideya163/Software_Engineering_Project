@@ -46,7 +46,10 @@ export default function ModelCard() {
       {data.issue_ranking_actionability && <Section title="Issue ranking - actionability" note={data.issue_ranking_actionability.caveat}>
         <Table columns={['Model', 'ROC-AUC', 'Average precision']} rows={[['ContriMap', data.issue_ranking_actionability.roc_auc, data.issue_ranking_actionability.average_precision], ['keyword heuristic', data.issue_ranking_actionability.baseline_heuristic_auc, data.issue_ranking_actionability.baseline_heuristic_ap], ['random', 0.5, data.issue_ranking_actionability.baseline_random_ap]]} />
       </Section>}
-      {data.success && <Section title="Contribution success (PR merged)" note={data.success.caveat}>
+      {data.actionability_multirepo && <Section title="Issue ranking - actionability on unseen repositories (deployed model)" note={`${data.actionability_multirepo.evaluation}. ${data.actionability_multirepo.caveat}`}>
+        <Table columns={['Held-out repository', 'Model AUC', 'Heuristic AUC']} rows={[['ContriMap mean', data.actionability_multirepo.mean_auc[data.actionability_multirepo.selected], data.actionability_multirepo.mean_auc.heuristic], ...Object.keys(data.actionability_multirepo.repositories).map(repo => [repo, data.actionability_multirepo.per_repository_auc[data.actionability_multirepo.selected][repo], data.actionability_multirepo.per_repository_auc.heuristic[repo]])]} />
+      </Section>}
+      {data.success &&<Section title="Contribution success (PR merged)" note={data.success.caveat}>
         <Table columns={['Model', 'ROC-AUC', 'Brier']} rows={[['ContriMap', data.success.roc_auc, data.success.brier], ['author merge rate only', data.success.baseline_author_merge_rate_auc, null], ['constant rate', 0.5, data.success.baseline_constant_brier]]} />
       </Section>}
       {data.success_multirepo && <Section title="Contribution success - unseen repositories (deployed model)" note={`${data.success_multirepo.evaluation}. ${data.success_multirepo.caveat}`}>

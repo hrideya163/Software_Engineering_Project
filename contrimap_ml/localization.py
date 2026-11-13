@@ -355,15 +355,22 @@ class LocalizationModel:
         return results
 
 
-def train_ranker(groups_x: list[np.ndarray], groups_y: list[np.ndarray], valid_x: list[np.ndarray] | None = None, valid_y: list[np.ndarray] | None = None, seed: int = 42):
+RANKER_CONFIGS = [
+    {"num_leaves": 31, "min_child_samples": 50, "learning_rate": 0.05},
+    {"num_leaves": 63, "min_child_samples": 30, "learning_rate": 0.05},
+    {"num_leaves": 127, "min_child_samples": 20, "learning_rate": 0.03},
+]
+
+
+def train_ranker(groups_x: list[np.ndarray], groups_y: list[np.ndarray], valid_x: list[np.ndarray] | None = None, valid_y: list[np.ndarray] | None = None, seed: int = 42, config: dict[str, Any] | None = None):
     from lightgbm import LGBMRanker, early_stopping, log_evaluation
 
     x = np.vstack(groups_x)
     y = np.concatenate(groups_y)
+    config = config or RANKER_CONFIGS[0]
     ranker = LGBMRanker(
-        objective="lambdarank", n_estimators=600, learning_rate=0.05, num_leaves=31, min_child_samples=50,
-        subsample=0.8, subsample_freq=1, colsample_bytree=0.8, reg_lambda=1.0, lambdarank_truncation_level=20,
-        verbosity=-1, random_state=seed,
+        objective="lambdarank", n_estimators=1500, subsample=0.8, subsample_freq=1, colsample_bytree=0.8, reg_lambda=1.0,
+        lambdarank_truncation_level=20, verbosity=-1, random_state=seed, **config,
     )
     fit_kwargs: dict[str, Any] = {"group": [len(group) for group in groups_y]}
     if valid_x:
@@ -400,5 +407,5 @@ def ranking_metrics(ranked_lists: list[list[str]], targets: list[set[str]], cand
 
 __all__ = [
     "FEATURES", "LocalizationModel", "PathFeatureCache", "RepoHistory", "baseline_scores", "candidate_features",
-    "localization_candidates", "prefilter", "ranking_metrics", "train_ranker",
+    "RANKER_CONFIGS", "localization_candidates", "prefilter", "ranking_metrics", "train_ranker",
 ]

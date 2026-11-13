@@ -204,3 +204,62 @@ def rank_issues(
 
 
 __all__ = ["ActionabilityModel", "DEFAULT_WEIGHTS", "availability_score", "clarity_score", "community_score", "focus_score", "freshness_score", "rank_issues", "train_actionability"]
+
+
+def _nextjs_issue_outcomes(raw_issues_path: Path = ROOT / "data" / "raw" / "issues.json") -> list[dict[str, Any]]:
+    from .corpus import load_nextjs
+
+    resolved = {int(uid.split(":")[1]) for uid in load_nextjs().uid}
+    return [{"repo": "vercel/next.js", "number": issue["number"], "title": issue["title"], "body": issue.get("body") or "", "labels": _labels(issue),
+             "created_at": issue["created_at"], "resolved_by_merged_pr": issue["number"] in resolved}
+            for issue in json.loads(raw_issues_path.read_text(encoding="utf-8")) if "pull_request" not in issue]
+
+
+def train_actionability_multirepo(issue_rows: Sequence[Mapping[str, Any]], include_nextjs: bool = True, seed: int = 42, max_per_repo: int = 3000, n_jobs: int = 4) -> tuple[ActionabilityModel, dict[str, Any]]:
+    """Leave-one-repository-out evaluation of the actionability model; the model is then refit on all repositories.
+
+    Sized for a ~15-minute run: one regularisation strength (C=0.1, best or tied on a 17-fold pilot),
+    20k TF-IDF features, at most ``max_per_repo`` issues per repository (caps next.js), folds in parallel.
+    """
+    from joblib import Parallel, delayed
+
+    rows = list(issue_rows) + (_nextjs_issue_outcomes() if include_nextjs else [])
+    rng = np.random.default_rng(seed)
+    by_repo: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        by_repo.setdefault(row["repo"], []).append(row)
+    by_repo = {repo: ([items[i] for i in rng.choice(len(items), max_per_repo, replace=False)] if len(items) > max_per_repo else items)
+               for repo, items in by_repo.items() if len(items) >= 50 and 0 < sum(i["resolved_by_merged_pr"] for i in items) < len(items)}
+    column = {name: index for index, name in enumerate(HANDCRAFTED_COLUMNS)}
+
+    def fold(held_out: str) -> tuple[str, float, float]:
+        train = [row for repo, items in by_repo.items() if repo != held_out for row in items]
+        test = by_repo[held_out]
+        y_test = np.asarray([int(i["resolved_by_merged_pr"]) for i in test])
+        hand = _hand_matrix(test)
+        heuristic = hand[:, column["title_bug"]] + hand[:, column["has_repro"]] + hand[:, column["label_bug"]] - hand[:, column["title_is_question"]]
+        return held_out, float(roc_auc_score(y_test, _fit_actionability(train).predict(test))), float(roc_auc_score(y_test, heuristic))
+
+    results: dict[str, dict[str, float]] = {"tfidf_lr": {}, "heuristic": {}}
+    for held_out, model_auc, heuristic_auc in Parallel(n_jobs=n_jobs)(delayed(fold)(repo) for repo in by_repo):
+        results["tfidf_lr"][held_out] = model_auc
+        results["heuristic"][held_out] = heuristic_auc
+        logger.info("Actionability LORO %s: model %.3f heuristic %.3f", held_out, model_auc, heuristic_auc)
+    mean = {name: float(np.mean(list(scores.values()))) for name, scores in results.items()}
+    model = _fit_actionability([row for items in by_repo.values() for row in items])
+    metrics = {
+        "evaluation": "leave-one-repository-out ROC-AUC; positive = closed issue resolved by a merged pull request",
+        "repositories": {repo: {"n": len(items), "positive_rate": float(np.mean([i["resolved_by_merged_pr"] for i in items]))} for repo, items in by_repo.items()},
+        "mean_auc": mean, "per_repository_auc": results, "selected": "tfidf_lr",
+        "caveat": "Labels are GitHub's closing-PR links; issues fixed without a linked PR count as negatives. GitHub labels are as of crawl time. next.js capped at 3,000 issues.",
+    }
+    model.metadata = metrics
+    return model, metrics
+
+
+def _fit_actionability(train: Sequence[Mapping[str, Any]], C: float = 0.1) -> ActionabilityModel:
+    y = np.asarray([int(i["resolved_by_merged_pr"]) for i in train])
+    tfidf = TfidfVectorizer(ngram_range=(1, 2), min_df=5, max_features=20000, sublinear_tf=True).fit([f"{i['title']}\n{i.get('body') or ''}" for i in train])
+    model = ActionabilityModel(tfidf=tfidf, scaler=StandardScaler().fit(_hand_matrix(train)), classifier=None, base_rate=float(y.mean()))  # type: ignore[arg-type]
+    model.classifier = LogisticRegression(C=C, solver="liblinear", class_weight="balanced").fit(model._inputs(train), y)
+    return model

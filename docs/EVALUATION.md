@@ -1,6 +1,6 @@
 # ContriMap evaluation report
 
-Generated from `artifacts/v2/evaluation_report.json` (2026-11-03T08:53:47.057627+00:00). Regenerate with `python -m contrimap_ml.report`.
+Generated from `artifacts/v2/evaluation_report.json` (2026-11-11T18:19:44.565699+00:00). Regenerate with `python -m contrimap_ml.report`.
 
 ## Data
 
@@ -18,24 +18,24 @@ Train, dev, test and multilingual groups use **disjoint repositories** (SWE-benc
 
 ## Difficulty classification
 
-Label: tertiles of log1p(LOC)+log1p(files)+0.5*log1p(hunks) on train repositories; thresholds [3.679, 5.614]. Model selection by repository-grouped 5-fold CV on training repositories (selected linear blend 0.7).
+Label: tertiles of log1p(LOC)+log1p(files) of non-test changes on train repositories; thresholds [3.178, 4.868]. Model selection by repository-grouped 5-fold CV on training repositories (selected linear blend 0.3).
 
 | Model / split | Accuracy | Macro-F1 | Spearman vs true size |
 |---|---|---|---|
-| **ContriMap** - dev (6 repos, n=225) | 0.524 | 0.505 | 0.525 |
-| stratified random - dev | 0.413 | 0.400 | - |
-| majority class - dev | 0.293 | 0.151 | - |
-| body-length tertiles - dev | 0.298 | 0.264 | - |
-| **ContriMap** - test (12 repos, n=2294) | 0.434 | 0.414 | 0.281 |
-| stratified random - test | 0.327 | 0.317 | - |
-| majority class - test | 0.358 | 0.176 | - |
-| body-length tertiles - test | 0.317 | 0.308 | - |
-| **ContriMap** - multilingual (41 repos, n=300) | 0.410 | 0.383 | 0.137 |
-| stratified random - multilingual | 0.330 | 0.324 | - |
-| majority class - multilingual | 0.390 | 0.187 | - |
-| body-length tertiles - multilingual | 0.273 | 0.246 | - |
+| **ContriMap** - dev (6 repos, n=225) | 0.476 | 0.472 | 0.509 |
+| stratified random - dev | 0.431 | 0.421 | - |
+| majority class - dev | 0.333 | 0.167 | - |
+| body-length tertiles - dev | 0.302 | 0.277 | - |
+| **ContriMap** - test (12 repos, n=2294) | 0.427 | 0.406 | 0.250 |
+| stratified random - test | 0.332 | 0.320 | - |
+| majority class - test | 0.379 | 0.183 | - |
+| body-length tertiles - test | 0.331 | 0.316 | - |
+| **ContriMap** - multilingual (41 repos, n=300) | 0.387 | 0.367 | 0.095 |
+| stratified random - multilingual | 0.333 | 0.326 | - |
+| majority class - multilingual | 0.387 | 0.186 | - |
+| body-length tertiles - multilingual | 0.270 | 0.245 | - |
 
-Change-size regressor (Huber): test MAE 1.396 vs train-median baseline 1.434; Spearman 0.242.
+Change-size regressor (Huber): test MAE 1.187 vs train-median baseline 1.225; Spearman 0.223.
 
 ## Effort estimation
 
@@ -43,29 +43,29 @@ Change-size regressor (Huber): test MAE 1.396 vs train-median baseline 1.434; Sp
 
 | Model | Bucket accuracy | Macro-F1 | MAE (levels) | Spearman vs human hours |
 |---|---|---|---|---|
-| **ContriMap** | 0.534 | 0.299 | 0.470 | 0.157 |
+| **ContriMap** | 0.536 | 0.310 | 0.468 | 0.124 |
 | majority bucket | 0.522 | - | 0.478 | - |
 
-The difficulty score alone correlates with human time-to-fix at Spearman 0.171. **Effort is a weak signal from issue text alone** and is presented as a bucket with a range.
+The difficulty score alone correlates with human time-to-fix at Spearman 0.166. **Effort is a weak signal from issue text alone** and is presented as a bucket with a range.
 
 ## Issue-to-file localization
 
 Hit = at least one file changed by the gold fix appears in the top k. Candidates are all files in the repository at the issue's base commit (tree mode) or files changed earlier in the repository (history mode).
 
-### dev (n=225, median 263 candidate files)
+### dev (n=225, median 262 candidate files)
 
 | Method | acc@1 | acc@5 | acc@10 | MRR |
 |---|---|---|---|---|
-| **ContriMap ranker** | 0.524 | 0.756 | 0.853 | 0.623 |
+| **ContriMap ranker** | 0.520 | 0.782 | 0.867 | 0.624 |
 
 Oracle coverage (a gold file exists among candidates): 0.991; prefilter coverage: 0.982.
 
-### test_verified_tree (n=500, median 1608 candidate files)
+### test_verified_tree (n=500, median 1604 candidate files)
 
 | Method | acc@1 | acc@5 | acc@10 | MRR |
 |---|---|---|---|---|
-| **ContriMap ranker** | 0.478 | 0.752 | 0.840 | 0.594 |
-| random | 0.000 | 0.006 | 0.012 | 0.003 |
+| **ContriMap ranker** | 0.492 | 0.760 | 0.842 | 0.605 |
+| random | 0.000 | 0.012 | 0.020 | 0.004 |
 | history frequency | 0.064 | 0.216 | 0.312 | 0.129 |
 | bm25 | 0.192 | 0.424 | 0.508 | 0.291 |
 | embedding | 0.246 | 0.454 | 0.578 | 0.336 |
@@ -74,25 +74,25 @@ Oracle coverage (a gold file exists among candidates): 0.991; prefilter coverage
 
 Oracle coverage (a gold file exists among candidates): 1.000; prefilter coverage: 0.970.
 
-### multilingual_tree (n=300, median 687 candidate files)
+### multilingual_tree (n=300, median 685 candidate files)
 
 | Method | acc@1 | acc@5 | acc@10 | MRR |
 |---|---|---|---|---|
-| **ContriMap ranker** | 0.373 | 0.653 | 0.757 | 0.495 |
-| random | 0.000 | 0.017 | 0.037 | 0.008 |
-| history frequency | 0.153 | 0.247 | 0.277 | 0.191 |
-| bm25 | 0.207 | 0.433 | 0.543 | 0.306 |
-| embedding | 0.170 | 0.363 | 0.453 | 0.252 |
-| similar issues knn | 0.163 | 0.263 | 0.280 | 0.206 |
-| legacy formula | 0.220 | 0.433 | 0.530 | 0.305 |
+| **ContriMap ranker** | 0.363 | 0.647 | 0.733 | 0.481 |
+| random | 0.013 | 0.043 | 0.073 | 0.028 |
+| history frequency | 0.097 | 0.210 | 0.240 | 0.142 |
+| bm25 | 0.207 | 0.430 | 0.543 | 0.306 |
+| embedding | 0.167 | 0.360 | 0.450 | 0.249 |
+| similar issues knn | 0.110 | 0.227 | 0.243 | 0.159 |
+| legacy formula | 0.213 | 0.423 | 0.527 | 0.298 |
 
-Oracle coverage (a gold file exists among candidates): 1.000; prefilter coverage: 0.923.
+Oracle coverage (a gold file exists among candidates): 1.000; prefilter coverage: 0.917.
 
 ### nextjs_history_last20pct (n=227, median 1326 candidate files)
 
 | Method | acc@1 | acc@5 | acc@10 | MRR |
 |---|---|---|---|---|
-| **ContriMap ranker** | 0.308 | 0.546 | 0.639 | 0.407 |
+| **ContriMap ranker** | 0.344 | 0.564 | 0.643 | 0.442 |
 | random | 0.004 | 0.018 | 0.022 | 0.011 |
 | history frequency | 0.115 | 0.225 | 0.361 | 0.174 |
 | bm25 | 0.093 | 0.220 | 0.304 | 0.146 |
@@ -104,7 +104,7 @@ Oracle coverage (a gold file exists among candidates): 0.828; prefilter coverage
 
 Legacy model on its own next.js temporal split (history candidates, all changed files as targets): recall@5 0.178, recall@10 0.238, MRR 0.117 - not directly comparable (different target definition and candidate set), and it could not localize in any other repository.
 
-Top ranker features by gain: bm25_rel (0.24), knn_sum (0.23), lang_match (0.09), mention_path (0.08), emb_pct (0.07), knn_max (0.06), mention_stem (0.05), hist_recency (0.05).
+Top ranker features by gain: knn_sum (0.29), bm25_rel (0.25), mention_path (0.11), knn_max (0.07), emb_pct (0.05), hist_recency (0.04), lang_match (0.04), mention_basename (0.03).
 
 ## Issue ranking - actionability component
 
@@ -118,6 +118,42 @@ vercel/next.js closed issues 2016-2021; positive = resolved by merged PR with cl
 | random | 0.500 | 0.075 |
 
 Precision@50: 0.320. Single repository; labels are current GitHub labels (some may have been added during triage). The other ranking components (availability, freshness, clarity, community, focus) are transparent rules, not learned, and are not separately evaluated.
+
+### Actionability across repositories (deployed model)
+
+leave-one-repository-out ROC-AUC; positive = closed issue resolved by a merged pull request; selected **tfidf_lr** (mean AUC by candidate: tfidf_lr 0.699, heuristic 0.579).
+
+| Held-out repository | Issues | Positive rate | Model AUC | Heuristic AUC |
+|---|---|---|---|---|
+| clap-rs/clap | 204.000 | 0.304 | 0.700 | 0.639 |
+| cli/cli | 600.000 | 0.073 | 0.887 | 0.662 |
+| expressjs/express | 266.000 | 0.071 | 0.706 | 0.472 |
+| pallets/flask | 195.000 | 0.113 | 0.631 | 0.485 |
+| psf/black | 351.000 | 0.419 | 0.723 | 0.581 |
+| pydantic/pydantic | 600.000 | 0.395 | 0.614 | 0.559 |
+| spf13/cobra | 67.000 | 0.104 | 0.760 | 0.577 |
+| vitejs/vite | 600.000 | 0.352 | 0.725 | 0.559 |
+| astral-sh/uv | 600.000 | 0.413 | 0.721 | 0.668 |
+| charmbracelet/bubbletea | 305.000 | 0.259 | 0.717 | 0.719 |
+| composer/composer | 600.000 | 0.203 | 0.734 | 0.596 |
+| encode/httpx | 239.000 | 0.188 | 0.794 | 0.507 |
+| eslint/eslint | 600.000 | 0.345 | 0.748 | 0.513 |
+| go-gitea/gitea | 600.000 | 0.560 | 0.638 | 0.589 |
+| helix-editor/helix | 600.000 | 0.197 | 0.620 | 0.547 |
+| Homebrew/brew | 600.000 | 0.532 | 0.701 | 0.721 |
+| junegunn/fzf | 600.000 | 0.107 | 0.554 | 0.515 |
+| microsoft/playwright | 600.000 | 0.478 | 0.636 | 0.592 |
+| pallets/click | 492.000 | 0.319 | 0.611 | 0.552 |
+| prettier/prettier | 600.000 | 0.438 | 0.736 | 0.555 |
+| python-poetry/poetry | 600.000 | 0.255 | 0.698 | 0.525 |
+| starship/starship | 600.000 | 0.247 | 0.718 | 0.467 |
+| Textualize/rich | 600.000 | 0.178 | 0.709 | 0.628 |
+| webpack/webpack | 600.000 | 0.377 | 0.847 | 0.680 |
+| withastro/astro | 600.000 | 0.625 | 0.671 | 0.609 |
+| vercel/next.js | 3000.000 | 0.116 | 0.583 | 0.532 |
+| **mean** | - | - | 0.699 | 0.579 |
+
+Labels are GitHub's closing-PR links; issues fixed without a linked PR count as negatives. GitHub labels are as of crawl time. next.js capped at 3,000 issues.
 
 ## Contribution success prediction
 
@@ -156,15 +192,15 @@ Localization on the last 20% of issues per repository (n=274); history from earl
 
 | Method | acc@1 | acc@5 | acc@10 | MRR |
 |---|---|---|---|---|
-| **ContriMap ranker** | 0.474 | 0.763 | 0.821 | 0.596 |
-| random | 0.007 | 0.022 | 0.062 | 0.017 |
+| **ContriMap ranker** | 0.474 | 0.763 | 0.850 | 0.601 |
+| random | 0.000 | 0.018 | 0.066 | 0.012 |
 | history frequency | 0.117 | 0.318 | 0.423 | 0.206 |
-| bm25 | 0.193 | 0.438 | 0.522 | 0.293 |
-| embedding | 0.150 | 0.383 | 0.500 | 0.254 |
+| bm25 | 0.193 | 0.434 | 0.526 | 0.293 |
+| embedding | 0.150 | 0.383 | 0.500 | 0.252 |
 | similar issues knn | 0.288 | 0.547 | 0.679 | 0.407 |
-| legacy formula | 0.237 | 0.533 | 0.664 | 0.362 |
+| legacy formula | 0.230 | 0.529 | 0.664 | 0.358 |
 
-acc@5 per repository: clap-rs/clap 0.62 (n=26), cli/cli 0.81 (n=48), pallets/flask 0.78 (n=9), psf/black 0.84 (n=61), pydantic/pydantic 0.80 (n=66), vitejs/vite 0.67 (n=64).
+acc@5 per repository: clap-rs/clap 0.65 (n=26), cli/cli 0.77 (n=48), pallets/flask 0.78 (n=9), psf/black 0.79 (n=61), pydantic/pydantic 0.82 (n=66), vitejs/vite 0.72 (n=64).
 
 ## Contributor-issue recommendation
 
@@ -173,11 +209,11 @@ rank active contributors for each next.js issue; hit = the actual resolver; cand
 | Method | acc@1 | acc@5 | acc@10 | MRR |
 |---|---|---|---|---|
 | **ContriMap combined** | 0.430 | 0.785 | 0.861 | 0.590 |
-| only skill | 0.367 | 0.785 | 0.835 | 0.573 |
-| only files | 0.316 | 0.835 | 0.873 | 0.545 |
+| only skill | 0.380 | 0.785 | 0.823 | 0.579 |
+| only files | 0.329 | 0.785 | 0.873 | 0.538 |
 | only semantic | 0.203 | 0.671 | 0.797 | 0.397 |
 | only success | 0.291 | 0.797 | 0.823 | 0.531 |
-| only difficulty fit | 0.076 | 0.278 | 0.278 | 0.192 |
+| only difficulty fit | 0.152 | 0.494 | 0.494 | 0.328 |
 | baseline popularity | 0.278 | 0.797 | 0.835 | 0.536 |
 | baseline random | 0.000 | 0.114 | 0.177 | 0.072 |
 

@@ -80,10 +80,11 @@ Legacy `/api/predict`, `/api/analyze` and `/api/repositories/issues` remain avai
 
 ## Known limitations
 
-- **Effort** estimates from issue text are weak (Spearman ≈ 0.16 with human time-to-fix; bucket accuracy barely above the majority baseline). They are shown as buckets with ranges, never as precise hours.
-- **Difficulty** generalises across repositories (macro-F1 0.41 vs 0.32 random) but per-issue confidence is often low.
+- **Effort** estimates from issue text are weak (Spearman ≈ 0.12-0.16 with human time-to-fix; bucket accuracy barely above the majority baseline). Neither a 3x larger embedder (BGE-large) nor 5k more training PRs changed this. Estimates are shown as buckets with ranges, never as precise hours.
+- **Difficulty** generalises across repositories (macro-F1 0.41 vs 0.32 random; 0.37 vs 0.33 across 9 unseen languages after adding 17 multi-language training repositories) but per-issue confidence is often low; text-only difficulty appears close to its ceiling.
 - **Localization** is trained mostly on Python bug fixes; documentation-only and feature-scale issues are under-represented. It transfers well to fresh repositories (acc@5 0.76 on 274 issues from 6 repositories ingested in 2023+, changelog files excluded), but repositories without ingested history run in text-only mode and score lower.
 - **Success prediction** is trained on 9 repositories and evaluated leave-one-repository-out (mean AUC 0.80 vs 0.75 for the author's merge rate).
-- **Actionability and contributor recommendation** are trained/evaluated on next.js only; cross-repository generalisation is not measured.
+- **Actionability** is trained on 26 repositories and evaluated leave-one-repository-out (mean AUC 0.70 vs 0.58 for a keyword heuristic).
+- **Contributor recommendation** is evaluated on next.js only; cross-repository generalisation is not measured.
 - **Personalised ranking, learning opportunities and LLM explanations** have no offline ground truth; they combine evaluated components with transparent rules.
 - Without a valid `GITHUB_TOKEN` the anonymous GitHub quota (60 requests/hour) is quickly exhausted; repository structure still works via git.

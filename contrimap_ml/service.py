@@ -162,9 +162,10 @@ def repo_history(repo: str) -> RepoHistory | None:
     try:
         from .ingest import load_ingested
 
-        ingested = load_ingested()
-        if not ingested.empty:
-            frames.append(ingested[ingested.repo.str.lower() == repo.lower()][["repo", "created_at", "text", "target_files"]])
+        for directory in (ROOT / "data" / "ingested", ROOT / "data" / "ingested_train"):
+            ingested = load_ingested(directory) if directory.exists() else pd.DataFrame()
+            if not ingested.empty:
+                frames.append(ingested[ingested.repo.str.lower() == repo.lower()][["repo", "created_at", "text", "target_files"]])
     except Exception:  # ingestion data is optional
         pass
     frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()

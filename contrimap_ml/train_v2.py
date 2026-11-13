@@ -34,6 +34,7 @@ from .localization import (
     baseline_scores,
     candidate_features,
     localization_candidates,
+    RANKER_CONFIGS,
     prefilter,
     ranking_metrics,
     train_ranker,
@@ -144,8 +145,19 @@ def train_localization(corpus: pd.DataFrame, embeddings: np.ndarray) -> tuple[Lo
     train = [entry for entry in train if entry["y"].any()]
     dev_fit = [entry for entry in dev if entry["y"].any()]
     logger.info("Localization training groups: %d train, %d dev", len(train), len(dev_fit))
-    ranker = train_ranker([e["x"] for e in train], [e["y"] for e in train], [e["x"] for e in dev_fit], [e["y"] for e in dev_fit])
-    model = LocalizationModel(ranker=ranker, metadata={"train_issues": len(train), "train_repositories": int(corpus.iloc[[e["index"] for e in train]].repo.nunique()), "best_iteration": int(getattr(ranker, "best_iteration_", 0) or 0)})
+    # Hyper-parameters chosen by MRR on the dev repositories (never on test).
+    best = None
+    selection = []
+    for config in RANKER_CONFIGS:
+        ranker = train_ranker([e["x"] for e in train], [e["y"] for e in train], [e["x"] for e in dev_fit], [e["y"] for e in dev_fit], config=config)
+        candidate = LocalizationModel(ranker=ranker)
+        mrr = _evaluate(candidate, dev)["model"]["mrr"]
+        selection.append({**config, "dev_mrr": mrr, "best_iteration": int(getattr(ranker, "best_iteration_", 0) or 0)})
+        logger.info("Ranker config %s: dev MRR %.4f", config, mrr)
+        if best is None or mrr > best[0]:
+            best = (mrr, candidate)
+    model = best[1]
+    model.metadata = {"train_issues": len(train), "train_repositories": int(corpus.iloc[[e["index"] for e in train]].repo.nunique()), "config_selection": selection}
 
     metrics: dict[str, Any] = {"features": FEATURES, "dev": _evaluate(model, dev)}
     verified = (group == "test") & corpus.human_level.notna().to_numpy()
@@ -166,6 +178,7 @@ def main() -> None:
     parser.add_argument("--stages", default="difficulty,localization,success,actionability,recommendation")
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
     parser.add_argument("--rebuild-corpus", action="store_true")
+    parser.add_argument("--no-extra-train", action="store_true", help="ignore data/ingested_train (GraphQL training repositories)")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     for noisy in ("faiss", "datasets", "sentence_transformers", "httpx"):
@@ -177,6 +190,17 @@ def main() -> None:
     report: dict[str, Any] = json.loads(report_path.read_text(encoding="utf-8")) if report_path.exists() else {}
 
     corpus = load_corpus(rebuild=args.rebuild_corpus)
+    extra_dir = ROOT / "data" / "ingested_train"
+    if not args.no_extra_train and extra_dir.exists():
+        from .ingest import load_ingested
+
+        extra = load_ingested(extra_dir)
+        if not extra.empty:
+            # Training-only repositories (disjoint from every evaluation group).
+            extra = extra.assign(eval_group="train", source="github_train", human_level=np.nan)
+            extra = extra[~extra.repo.isin(set(corpus[corpus.eval_group != "train"].repo))]
+            corpus = pd.concat([corpus, extra[[c for c in extra.columns if c in corpus.columns]]], ignore_index=True)
+            logger.info("Added %d training issues from %d ingested repositories", len(extra), extra.repo.nunique())
     embeddings = embed(corpus.text.fillna("").tolist())
     report["corpus"] = {
         "records": int(len(corpus)),
@@ -208,6 +232,13 @@ def main() -> None:
         model, metrics = train_actionability(corpus=corpus)
         joblib.dump(model, output / "actionability.joblib")
         report["issue_ranking_actionability"] = metrics
+    if "actionability_multirepo" in stages:
+        from .ingest import OUTPUT as INGESTED, load_issue_outcomes
+        from .issue_ranking import train_actionability_multirepo
+
+        model, metrics = train_actionability_multirepo(load_issue_outcomes(INGESTED, ROOT / "data" / "ingested_train"))
+        joblib.dump(model, output / "actionability.joblib")
+        report["actionability_multirepo"] = metrics
     if "success_multirepo" in stages:
         from .ingest import load_pr_outcomes
         from .success import train_success_multirepo

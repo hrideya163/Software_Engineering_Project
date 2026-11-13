@@ -43,7 +43,7 @@ query($q: String!, $cursor: String) {
     pageInfo { hasNextPage endCursor }
     nodes {
       ... on PullRequest {
-        number title createdAt mergedAt closedAt merged additions deletions changedFiles
+        number title createdAt mergedAt closedAt merged additions deletions changedFiles baseRefOid
         author { login }
         commits { totalCount }
         reviews { totalCount }
@@ -122,7 +122,7 @@ def pull_request_rows(repo: str, pr: dict[str, Any]) -> list[dict[str, Any]]:
             "eval_group": "github",
             "repo": repo,
             "created_at": issue["createdAt"],
-            "base_commit": None,
+            "base_commit": pr.get("baseRefOid"),
             "title": issue.get("title") or "",
             "body": issue.get("body") or "",
             "labels": [label["name"] for label in (issue.get("labels") or {}).get("nodes") or []],
@@ -203,6 +203,57 @@ def load_pr_outcomes(directory: Path = OUTPUT) -> dict[str, list[dict[str, Any]]
     return {path.name.removesuffix(".outcomes.json").replace("__", "/", 1): json.loads(path.read_text(encoding="utf-8")) for path in sorted(directory.glob("*.outcomes.json"))}
 
 
+ISSUE_QUERY = """
+query($q: String!, $cursor: String) {
+  rateLimit { remaining resetAt cost }
+  search(query: $q, type: ISSUE, first: 50, after: $cursor) {
+    pageInfo { hasNextPage endCursor }
+    nodes { ... on Issue {
+      number title body createdAt closedAt stateReason
+      labels(first: 20) { nodes { name } }
+      closedByPullRequestsReferences(first: 3, includeClosedPrs: false) { nodes { merged } }
+    } }
+  }
+}
+"""
+
+
+def ingest_issue_outcomes(repo: str, transport: Transport, since: str = "2024-01-01", max_issues: int = 600, output: Path = OUTPUT) -> Path:
+    """Closed issues with their outcome: resolved by a merged PR (actionable) or not.
+
+    Labels are as of crawl time; only title/body/labels are used as features.
+    """
+    cursor = None
+    issues: list[dict[str, Any]] = []
+    query = f"repo:{repo} is:issue is:closed created:>={since} sort:created-desc"
+    while len(issues) < max_issues:
+        page = transport(ISSUE_QUERY, {"q": query, "cursor": cursor})["search"]
+        for node in page["nodes"]:
+            if not node:
+                continue
+            merged = any(pr and pr.get("merged") for pr in (node.get("closedByPullRequestsReferences") or {}).get("nodes") or [])
+            issues.append({"repo": repo, "number": node["number"], "title": node.get("title") or "", "body": (node.get("body") or "")[:20000],
+                           "labels": [label["name"] for label in (node.get("labels") or {}).get("nodes") or []], "created_at": node["createdAt"],
+                           "state_reason": node.get("stateReason"), "resolved_by_merged_pr": merged})
+        if not page["pageInfo"]["hasNextPage"]:
+            break
+        cursor = page["pageInfo"]["endCursor"]
+    issues = issues[:max_issues]
+    target = output / f"{repo.replace('/', '__')}.issues.json"
+    output.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(issues), encoding="utf-8")
+    logger.info("%s: %d closed issues (%.2f resolved by merged PR)", repo, len(issues), sum(i["resolved_by_merged_pr"] for i in issues) / max(len(issues), 1))
+    return target
+
+
+def load_issue_outcomes(*directories: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for directory in directories or (OUTPUT,):
+        for path in sorted(directory.glob("*.issues.json")):
+            rows.extend(json.loads(path.read_text(encoding="utf-8")))
+    return rows
+
+
 def load_ingested(directory: Path = OUTPUT) -> pd.DataFrame:
     frames = [pd.read_json(path, lines=True) for path in sorted(directory.glob("*.jsonl")) if path.stat().st_size]
     if not frames:
@@ -224,17 +275,22 @@ def main() -> None:
     parser.add_argument("repositories", nargs="+", help="owner/name")
     parser.add_argument("--since", default="2022-01-01")
     parser.add_argument("--max-prs", type=int, default=400)
+    parser.add_argument("--output", default=str(OUTPUT), help="data/ingested is the fresh-evaluation set; use data/ingested_train for training data")
+    parser.add_argument("--issues", action="store_true", help="also collect closed-issue outcomes (actionability)")
     args = parser.parse_args()
     transport = github_transport()
+    output = Path(args.output)
     for repo in args.repositories:
         try:
-            ingest_repository(repo, transport, args.since, args.max_prs)
-        except GraphQLError as error:
-            parser.exit(1, f"{repo}: {error}\n")
+            ingest_repository(repo, transport, args.since, args.max_prs, output)
+            if args.issues:
+                ingest_issue_outcomes(repo, transport, args.since, output=output)
+        except (GraphQLError, requests.RequestException) as error:
+            logger.error("%s skipped: %s", repo, error)
 
 
 if __name__ == "__main__":
     main()
 
 
-__all__ = ["GraphQLError", "github_transport", "ingest_pr_outcomes", "ingest_repository", "load_ingested", "load_pr_outcomes", "pull_request_rows"]
+__all__ = ["GraphQLError", "github_transport", "ingest_issue_outcomes", "ingest_pr_outcomes", "ingest_repository", "load_ingested", "load_issue_outcomes", "load_pr_outcomes", "pull_request_rows"]
