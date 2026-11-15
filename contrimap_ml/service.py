@@ -50,9 +50,18 @@ class GitHubError(RuntimeError):
 # Small TTL cache
 # ---------------------------------------------------------------------------
 class TTLCache:
-    def __init__(self) -> None:
+    """In-memory TTL cache with single-flight loading.
+
+    Concurrent requests for the same missing key wait for one ``factory`` call instead of
+    each running it: the repository page fires overview, issues and architecture requests
+    at once, and each used to snapshot the same repository in parallel.
+    """
+
+    def __init__(self, max_entries: int = 2048) -> None:
         self._data: dict[str, tuple[float, Any]] = {}
         self._lock = threading.Lock()
+        self._inflight: dict[str, threading.Lock] = {}
+        self._max_entries = max_entries
 
     def peek(self, key: str) -> Any | None:
         with self._lock:
@@ -64,10 +73,25 @@ class TTLCache:
             hit = self._data.get(key)
             if hit and hit[0] > time.time():
                 return hit[1]
-        value = factory()
-        with self._lock:
-            self._data[key] = (time.time() + ttl, value)
-        return value
+            key_lock = self._inflight.setdefault(key, threading.Lock())
+        with key_lock:
+            with self._lock:
+                hit = self._data.get(key)
+                if hit and hit[0] > time.time():
+                    return hit[1]
+            try:
+                value = factory()
+            finally:
+                with self._lock:
+                    self._inflight.pop(key, None)
+            with self._lock:
+                if len(self._data) >= self._max_entries:
+                    now = time.time()
+                    expired = [k for k, (expiry, _) in self._data.items() if expiry <= now]
+                    for stale in expired or sorted(self._data, key=lambda k: self._data[k][0])[: self._max_entries // 10]:
+                        self._data.pop(stale, None)
+                self._data[key] = (time.time() + ttl, value)
+            return value
 
 
 CACHE = TTLCache()
@@ -82,17 +106,34 @@ class GitHub:
         self.session.headers.update({"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
         self.token = token if token is not None else os.getenv("GITHUB_TOKEN")
         self._token_valid = bool(self.token)
+        self._etags: dict[str, tuple[str, Any]] = {}
+        self._etag_lock = threading.Lock()
+        self.quota: dict[str, Any] | None = None
 
     def get(self, path: str, **params: Any) -> Any:
+        """GET with conditional requests: a ``304 Not Modified`` answer does not count against the rate limit."""
+        key = path + "?" + "&".join(f"{k}={params[k]}" for k in sorted(params))
+        with self._etag_lock:
+            cached = self._etags.get(key)
         headers = {"Authorization": f"Bearer {self.token}"} if self._token_valid else {}
+        if cached:
+            headers["If-None-Match"] = cached[0]
         try:
             response = self.session.get(f"{GITHUB_API}{path}", params=params, headers=headers, timeout=20)
             if response.status_code == 401 and self._token_valid:
                 logger.warning("GITHUB_TOKEN rejected (401); continuing anonymously")
                 self._token_valid = False
-                response = self.session.get(f"{GITHUB_API}{path}", params=params, timeout=20)
+                headers.pop("Authorization", None)
+                response = self.session.get(f"{GITHUB_API}{path}", params=params, headers=headers, timeout=20)
         except requests.RequestException as error:
+            if cached:  # stale data beats an error page when GitHub is unreachable
+                return cached[1]
             raise GitHubError(f"Could not reach GitHub ({error.__class__.__name__}).", 504) from error
+        self._remember_quota(response)
+        if response.status_code == 304 and cached:
+            return cached[1]
+        if response.status_code in (403, 429) and response.headers.get("X-RateLimit-Remaining") == "0" and cached:
+            return cached[1]
         if response.status_code == 404:
             raise GitHubError("Not found on GitHub.", 404)
         if response.status_code in (403, 429) and response.headers.get("X-RateLimit-Remaining") == "0":
@@ -101,7 +142,19 @@ class GitHub:
             raise GitHubError(f"GitHub API rate limit exceeded (resets {when}). Set a valid GITHUB_TOKEN for 5,000 requests/hour.", 429)
         if response.status_code >= 400:
             raise GitHubError(f"GitHub API error {response.status_code}: {response.text[:200]}", 502)
-        return response.json()
+        payload = response.json()
+        etag = response.headers.get("ETag")
+        if etag:
+            with self._etag_lock:
+                if len(self._etags) >= 4096:
+                    self._etags.pop(next(iter(self._etags)))
+                self._etags[key] = (etag, payload)
+        return payload
+
+    def _remember_quota(self, response: requests.Response) -> None:
+        remaining, limit, reset = (response.headers.get(name) for name in ("X-RateLimit-Remaining", "X-RateLimit-Limit", "X-RateLimit-Reset"))
+        if remaining is not None and limit is not None:
+            self.quota = {"remaining": int(remaining), "limit": int(limit), "reset": int(reset) if reset else None}
 
     @property
     def authenticated(self) -> bool:
@@ -209,19 +262,83 @@ def _repo_meta(owner: str, repo: str) -> dict[str, Any]:
         return {"full_name": f"{owner}/{repo}", "available": False, "reason": str(error)}
 
 
+PREPARATION_STAGES = [
+    ("queued", "Waiting to start"),
+    ("tree", "Reading the file tree with git"),
+    ("contents", "Downloading source files"),
+    ("imports", "Resolving imports and the technology stack"),
+    ("graph", "Building the knowledge graph"),
+    ("metrics", "Ranking core files and detecting modules"),
+    ("ready", "Ready"),
+]
+_STAGE_INDEX = {name: index for index, (name, _) in enumerate(PREPARATION_STAGES)}
+_JOBS: dict[str, dict[str, Any]] = {}
+_JOBS_LOCK = threading.Lock()
+
+
+def _job_update(key: str, stage: str, message: str | None = None, **extra: Any) -> None:
+    with _JOBS_LOCK:
+        job = _JOBS.setdefault(key, {"started_at": time.time()})
+        step = _STAGE_INDEX.get(stage, job.get("step", 0))
+        job.update({"stage": stage, "message": message or dict(PREPARATION_STAGES).get(stage, stage), "step": step, "steps": len(PREPARATION_STAGES) - 1, "updated_at": time.time(), **extra})
+
+
 def repository_context(owner: str, repo: str) -> dict[str, Any]:
-    """Snapshot + knowledge graph + metrics for the default branch (cached ~15 min)."""
+    """Snapshot + knowledge graph + metrics for the default branch (cached ~15 min, single-flight)."""
     full = f"{owner}/{repo}"
+    key = f"context:{full}".lower()
 
     def load() -> dict[str, Any]:
+        _job_update(key, "tree", started_at=time.time(), state="running", error=None)
         try:
-            snapshot = build_git_snapshot(full)
+            snapshot = build_git_snapshot(full, progress=lambda stage, message: _job_update(key, stage, message))
         except Exception as error:
-            raise GitHubError(f"Could not fetch {full} with git: {error}", 404 if "not found" in str(error).lower() or "could not read" in str(error).lower() else 502) from error
+            failure = GitHubError(f"Could not fetch {full} with git: {error}", 404 if "not found" in str(error).lower() or "could not read" in str(error).lower() else 502)
+            _job_update(key, "error", str(failure), state="error", error=str(failure))
+            raise failure from error
+        _job_update(key, "graph", f"Building the knowledge graph ({snapshot['file_count']:,} files)")
         graph = build_repository_graph(snapshot)
-        return {"snapshot": snapshot, "graph": graph, "metrics": graph_metrics(graph)}
+        _job_update(key, "metrics")
+        metrics = graph_metrics(graph)
+        _job_update(key, "ready", state="ready", file_count=snapshot["file_count"], sha=snapshot["sha"])
+        return {"snapshot": snapshot, "graph": graph, "metrics": metrics}
 
-    return CACHE.get_or_set(f"context:{full}".lower(), 900, load)
+    return CACHE.get_or_set(key, 900, load)
+
+
+def preparation_status(owner: str, repo: str) -> dict[str, Any]:
+    """Progress of the background snapshot/graph build shown while a repository page loads."""
+    key = f"context:{owner}/{repo}".lower()
+    labels = [label for _, label in PREPARATION_STAGES[1:]]
+    if CACHE.peek(key) is not None:
+        return {"state": "ready", "stage": "ready", "message": "Ready", "step": len(PREPARATION_STAGES) - 1, "steps": len(PREPARATION_STAGES) - 1, "stages": labels}
+    with _JOBS_LOCK:
+        job = dict(_JOBS.get(key) or {"state": "idle", "stage": "queued", "message": "Not started", "step": 0, "steps": len(PREPARATION_STAGES) - 1})
+    if job.get("state") == "ready":  # finished earlier but the cached context expired
+        job = {"state": "idle", "stage": "queued", "message": "Not started", "step": 0, "steps": len(PREPARATION_STAGES) - 1}
+    if "started_at" in job:
+        job["elapsed_seconds"] = round(time.time() - job["started_at"], 1)
+    job["stages"] = labels
+    return job
+
+
+def prepare_repository(owner: str, repo: str) -> dict[str, Any]:
+    """Start building the repository context in the background (idempotent) and return its status."""
+    key = f"context:{owner}/{repo}".lower()
+    with _JOBS_LOCK:
+        state = (_JOBS.get(key) or {}).get("state")
+    if CACHE.peek(key) is not None or state in ("running", "queued"):
+        return preparation_status(owner, repo)
+    _job_update(key, "queued", state="queued", started_at=time.time(), error=None)
+
+    def run() -> None:
+        try:
+            repository_context(owner, repo)
+        except Exception as error:  # recorded in the job; the page shows it
+            _job_update(key, "error", str(error), state="error", error=str(error))
+
+    threading.Thread(target=run, name=f"prepare-{owner}/{repo}", daemon=True).start()
+    return preparation_status(owner, repo)
 
 
 def repository_overview(owner: str, repo: str) -> dict[str, Any]:
@@ -293,15 +410,48 @@ def get_issue(owner: str, repo: str, number: int) -> dict[str, Any]:
     return CACHE.get_or_set(f"issue:{owner}/{repo}#{number}".lower(), 300, lambda: _map_issue(github().get(f"/repos/{owner}/{repo}/issues/{number}")))
 
 
-def _localize(full: str, context: Mapping[str, Any], issue: Mapping[str, Any], query: np.ndarray, top_k: int = 10) -> list[dict[str, Any]]:
+READ_CODE = os.getenv("CONTRIMAP_READ_CODE", "1") != "0"
+
+
+def _localize_many(full: str, context: Mapping[str, Any], issues: Sequence[Mapping[str, Any]], queries: np.ndarray, top_k: int = 10) -> list[tuple[list[dict[str, Any]], dict[str, float]]]:
+    """Localize several issues; the code of every shortlist is downloaded in one git request, then read locally."""
+    from .repo_trees import fetch_blobs, prefetch_blobs
+
+    model = models().localization
+    snapshot = context["snapshot"]
+    history = repo_history(full)
     with _PATH_LOCK:
-        return models().localization.rank(issue["title"], issue.get("body") or "", context["snapshot"]["files"], query, PATH_CACHE, repo_history(full), _repo_languages().get(full), top_k=top_k)
+        states = [model.shortlist(issue["title"], issue.get("body") or "", snapshot["files"], query, PATH_CACHE, history, _repo_languages().get(full)) for issue, query in zip(issues, queries)]
+    download = True
+    if READ_CODE:
+        try:
+            prefetch_blobs(full, [(snapshot["sha"], state.paths) for state in states if state.paths])
+            download = False
+        except Exception as error:  # fall back to per-issue reads (or stage 1 if those fail too)
+            logger.warning("Could not prefetch shortlist code for %s: %s", full, error)
+    results = []
+    for state in states:
+        contents: Mapping[str, str] = {}
+        if READ_CODE and state.paths:
+            try:
+                contents = fetch_blobs(full, snapshot["sha"], state.paths, download=download)
+            except Exception as error:
+                logger.warning("Could not read shortlist code for %s: %s", full, error)
+        results.append(model.finish(state, contents, top_k, with_signals=True))
+    return results
 
 
-def _difficulty_batch(issues: Sequence[Mapping[str, Any]], embeddings: np.ndarray) -> list[dict[str, Any]]:
-    frame = pd.DataFrame([{"title": i["title"], "body": i.get("body") or "", "labels": i.get("labels") or [], "text": f"{i['title']}\n{i.get('body') or ''}".strip()} for i in issues])
-    output = models().difficulty.predict_frame(frame, embeddings)
+def _localize(full: str, context: Mapping[str, Any], issue: Mapping[str, Any], query: np.ndarray, top_k: int = 10) -> tuple[list[dict[str, Any]], dict[str, float]]:
+    return _localize_many(full, context, [issue], query[None, :], top_k)[0]
+
+
+def _difficulty_batch(issues: Sequence[Mapping[str, Any]], embeddings: np.ndarray, signals: Sequence[Mapping[str, float]] | None = None) -> list[dict[str, Any]]:
     from .difficulty import DIFFICULTY_CLASSES, effort_from_distribution
+    from .localization import LOC_SIGNALS
+
+    frame = pd.DataFrame([{"title": i["title"], "body": i.get("body") or "", "labels": i.get("labels") or [], "text": f"{i['title']}\n{i.get('body') or ''}".strip()} for i in issues])
+    matrix = np.asarray([[row.get(name, 0.0) for name in LOC_SIGNALS] for row in signals], dtype="float64") if signals else None
+    output = models().difficulty.predict_frame(frame, embeddings, loc_signals=matrix)
 
     results = []
     for index in range(len(issues)):
@@ -312,6 +462,7 @@ def _difficulty_batch(issues: Sequence[Mapping[str, Any]], embeddings: np.ndarra
             "difficulty_probability": float(proba[best]),
             "difficulty_distribution": {name: float(p) for name, p in zip(DIFFICULTY_CLASSES, proba)},
             "confidence": "low" if proba[best] < 0.5 else ("medium" if proba[best] < 0.65 else "high"),
+            "difficulty_inputs": "issue text + likely change site (code read)" if output.get("uses_code_signals") else "issue text",
         }
         if "effort_proba" in output:
             row.update(effort_from_distribution(output["effort_proba"][index], models().difficulty.metadata.get("effort_classes", [0, 1, 2])))
@@ -326,14 +477,29 @@ def _success(profile: UserProfile | None, issue: Mapping[str, Any], history: Map
     return models().success.predict_attempt(int(history.get("prior_prs", 0)), int(history.get("prior_merged", 0)), issue["title"], issue.get("body") or "", login=(profile.login if profile and profile.login else ""))
 
 
+def _result_key(kind: str, owner: str, repo: str, *parts: Any) -> str:
+    """Cache key for a computed result: the repository snapshot is part of the key via the context TTL."""
+    import hashlib
+    import json
+
+    digest = hashlib.sha1(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()[:16]
+    return f"{kind}:{owner}/{repo}:{digest}".lower()
+
+
 def analyze_issue(owner: str, repo: str, issue: Mapping[str, Any], profile_data: Mapping[str, Any] | None = None, with_explanation: bool = True) -> dict[str, Any]:
+    """Full analysis; cached for 10 minutes per (issue text and update time, profile, explanation flag)."""
+    key = _result_key("analysis", owner, repo, issue.get("number"), issue.get("title"), issue.get("body"), issue.get("labels"), issue.get("updated_at"), profile_data, with_explanation)
+    return CACHE.get_or_set(key, 600, lambda: _analyze_issue(owner, repo, issue, profile_data, with_explanation))
+
+
+def _analyze_issue(owner: str, repo: str, issue: Mapping[str, Any], profile_data: Mapping[str, Any] | None = None, with_explanation: bool = True) -> dict[str, Any]:
     full = f"{owner}/{repo}"
     context = repository_context(owner, repo)
     graph, metrics, snapshot = context["graph"], context["metrics"], context["snapshot"]
     text = f"{issue['title']}\n{issue.get('body') or ''}".strip()
     query = embed([text], cache=False)[0]
-    estimate = _difficulty_batch([issue], query[None, :])[0]
-    files = _localize(full, context, issue, query)
+    files, signals = _localize(full, context, issue, query)
+    estimate = _difficulty_batch([issue], query[None, :], [signals])[0]
     for item in files:
         item["importance"] = round(metrics["pagerank"].get(item["path"], 0.0), 5)
     repo_skills = {skill["id"]: {"weight": skill["weight"], "evidence": skill["evidence"]} for skill in snapshot["skills"]}
@@ -354,7 +520,7 @@ def analyze_issue(owner: str, repo: str, issue: Mapping[str, Any], profile_data:
         "skills": as_public(issue_skills, limit=10),
         "actionability": actionability,
         "success_probability": success,
-        "localization_mode": "history+text" if repo_history(full) is not None else "text-only (no resolved-issue history ingested for this repository)",
+        "localization_mode": ("history+text" if repo_history(full) is not None else "text-only (no resolved-issue history ingested for this repository)") + (" + code of the top candidates read" if files and files[0].get("code_read") else ""),
     }
     if profile is not None:
         personal = personal_components(profile, issue_skills, estimate["difficulty_distribution"], query, _interest_embedding(tuple(profile.interests)), success)
@@ -380,6 +546,12 @@ def _interest_embedding(interests: tuple[str, ...]) -> np.ndarray | None:
 
 
 def ranked_issues(owner: str, repo: str, profile_data: Mapping[str, Any] | None = None, mode: str = "balanced", limit: int = 30) -> dict[str, Any]:
+    """Ranked open issues; cached for 5 minutes (as long as the issue list) per profile, mode and limit."""
+    key = _result_key("ranked", owner, repo, profile_data, mode, limit)
+    return CACHE.get_or_set(key, 300, lambda: _ranked_issues(owner, repo, profile_data, mode, limit))
+
+
+def _ranked_issues(owner: str, repo: str, profile_data: Mapping[str, Any] | None = None, mode: str = "balanced", limit: int = 30) -> dict[str, Any]:
     full = f"{owner}/{repo}"
     issues = list_issues(owner, repo, limit=limit)
     if not issues:
@@ -387,14 +559,14 @@ def ranked_issues(owner: str, repo: str, profile_data: Mapping[str, Any] | None 
     context = repository_context(owner, repo)
     texts = [f"{i['title']}\n{i.get('body') or ''}".strip() for i in issues]
     embeddings = embed(texts, cache=False)
-    estimates = _difficulty_batch(issues, embeddings)
+    localized = _localize_many(full, context, issues, embeddings, top_k=5)
+    estimates = _difficulty_batch(issues, embeddings, [signals for _, signals in localized])
     actionability = models().actionability.predict(issues) if models().actionability is not None else None
     repo_skills = {skill["id"]: {"weight": skill["weight"], "evidence": skill["evidence"]} for skill in context["snapshot"]["skills"]}
     profile = UserProfile.from_dict(profile_data) if profile_data else None
     interest = _interest_embedding(tuple(profile.interests)) if profile else None
     analyses, extras, personal_details = [], [], []
-    for issue, estimate, query in zip(issues, estimates, embeddings):
-        files = _localize(full, context, issue, query, top_k=5)
+    for issue, estimate, query, (files, _) in zip(issues, estimates, embeddings, localized):
         issue_skills = extract_issue_skills(issue["title"], issue.get("body") or "", issue.get("labels") or [], [f["path"] for f in files], repo_skills)
         analyses.append({**estimate, "files": files, "skills": as_public(issue_skills, limit=6)})
         if profile is not None:
@@ -439,6 +611,30 @@ def learning_opportunities(owner: str, repo: str, profile_data: Mapping[str, Any
 # ---------------------------------------------------------------------------
 # Contributors and trending
 # ---------------------------------------------------------------------------
+PROFILE_PR_FILES = int(os.getenv("CONTRIMAP_PROFILE_PR_FILES", "8"))
+
+
+def _attach_changed_files(contributions: list[dict[str, Any]], limit: int = PROFILE_PR_FILES) -> None:
+    """Add the files changed by the most recent merged PRs, so skills come from code paths, not titles only.
+
+    Costs one request per PR; skipped when the remaining GitHub quota is low (anonymous: 60/hour).
+    """
+    client = github()
+    quota = client.quota or {}
+    budget = limit if client.authenticated else min(limit, max(0, int(quota.get("remaining", 0)) - 30) // 2)
+    for item in contributions[:budget]:
+        if not item.get("number") or "/" not in item.get("repository", ""):
+            continue
+        try:
+            files = client.get(f"/repos/{item['repository']}/pulls/{int(item['number'])}/files", per_page=100)
+        except GitHubError as error:
+            logger.info("Changed files unavailable for %s#%s: %s", item["repository"], item["number"], error)
+            if error.status == 429:
+                break
+            continue
+        item["files"] = [entry["filename"] for entry in files if isinstance(entry, Mapping) and entry.get("filename")]
+
+
 def contributor_profile(login: str) -> dict[str, Any]:
     def load() -> dict[str, Any]:
         user = github().get(f"/users/{login}")
@@ -447,7 +643,8 @@ def contributor_profile(login: str) -> dict[str, Any]:
         contributions = []
         for item in merged.get("items") or []:
             repo_name = item.get("repository_url", "").split("/repos/")[-1]
-            contributions.append({"title": item.get("title") or "", "files": [], "created_at": item.get("created_at"), "repository": repo_name})
+            contributions.append({"title": item.get("title") or "", "files": [], "created_at": item.get("created_at"), "repository": repo_name, "number": item.get("number")})
+        _attach_changed_files(contributions)
         languages = Counter(r.get("language") for r in repos if r.get("language") and not r.get("fork"))
         topics = [topic for r in repos for topic in (r.get("topics") or [])]
         profile = ContributorProfile.from_contributions(login, contributions)
@@ -460,7 +657,8 @@ def contributor_profile(login: str) -> dict[str, Any]:
             "name": user.get("name"), "avatar_url": user.get("avatar_url"), "html_url": user.get("html_url"), "bio": user.get("bio"),
             "public_repos": user.get("public_repos"), "followers": user.get("followers"), "merged_pull_requests": total_merged,
             "top_languages": [{"name": name, "repositories": count} for name, count in languages.most_common(6)],
-            "recent_contributions": [{"title": c["title"], "repository": c["repository"], "created_at": c["created_at"]} for c in contributions[:10]],
+            "recent_contributions": [{"title": c["title"], "repository": c["repository"], "created_at": c["created_at"], "files_changed": len(c["files"])} for c in contributions[:10]],
+            "skills_from_changed_files": sum(1 for c in contributions if c["files"]),
             "suggested_profile": {"level": profile.level, "tech_stack": [s["name"] for s in as_public(profile.skills, 6) if s["category"] in {"language", "framework"}], "interests": topics[:6]},
         })
         return public
@@ -509,19 +707,24 @@ def model_card_summary() -> dict[str, Any]:
     report = models().report
     difficulty = report.get("difficulty", {})
     localization = report.get("localization", {})
+    reranker = localization.get("code_reranker") or {}
+    shipped = reranker if reranker.get("selected") else localization
     return {
         "difficulty_macro_f1_unseen_repos": (difficulty.get("test") or {}).get("model", {}).get("macro_f1"),
         "difficulty_baseline_macro_f1": (difficulty.get("test") or {}).get("baselines", {}).get("stratified_random", {}).get("macro_f1"),
         "effort_spearman_vs_human": (difficulty.get("effort") or {}).get("spearman_expected_hours_vs_human"),
-        "localization_acc_at_5_verified": (localization.get("test_verified_tree") or {}).get("model", {}).get("acc@5"),
-        "localization_acc_at_5_multilingual": (localization.get("multilingual_tree") or {}).get("model", {}).get("acc@5"),
+        # The shipped model's numbers: stage 2 (code reading) when it was selected, else stage 1.
+        "localization_acc_at_5_verified": (shipped.get("test_verified_tree") or {}).get("model", {}).get("acc@5"),
+        "localization_acc_at_5_multilingual": (shipped.get("multilingual_tree") or {}).get("model", {}).get("acc@5"),
+        "localization_acc_at_5_verified_without_history": (shipped.get("test_verified_nohist") or {}).get("model", {}).get("acc@5"),
+        "localization_reads_code": bool(reranker.get("selected")),
     }
 
 
 def health() -> dict[str, Any]:
     client = github()
     token = "missing" if not client.token else ("rejected" if not client.authenticated else "configured")
-    status = {"artifacts": str(ARTIFACTS), "github_token": token, "llm_configured": bool(os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN"))}
+    status = {"artifacts": str(ARTIFACTS), "github_token": token, "github_quota": client.quota, "read_code": READ_CODE, "llm_configured": bool(os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN"))}
     try:
         models()
         status["models_loaded"] = True

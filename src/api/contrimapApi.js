@@ -11,6 +11,8 @@ export const getTrending = ({ language = '', limit = 12 } = {}) => {
   if (language) params.set('language', language)
   return mlRequest(`/api/trending?${params}`)
 }
+export const prepareRepository = (owner, repo) => mlRequest(`/api/repos/${owner}/${repo}/prepare`, { method: 'POST' })
+export const getPreparationStatus = (owner, repo) => mlRequest(`/api/repos/${owner}/${repo}/status`)
 export const getRepositoryOverview = (owner, repo) => mlRequest(`/api/repos/${owner}/${repo}`)
 export const getRankedIssues = (owner, repo, { profile, mode = 'balanced', limit = 30 } = {}) => hasProfile(profile)
   ? post(`/api/repos/${owner}/${repo}/issues/ranked`, { profile, mode, limit })

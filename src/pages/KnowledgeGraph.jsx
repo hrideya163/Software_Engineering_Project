@@ -6,10 +6,11 @@ import ErrorMessage from '../components/ErrorMessage'
 import FlowGraph, { Legend } from '../components/FlowGraph'
 import Loading from '../components/Loading'
 import { useAsync } from '../hooks/useProfile'
+import RepositoryGate from '../components/RepositoryGate'
 
 // Architecture map: directories sized by file count, edges = aggregated imports,
 // optionally highlighting where a given issue's predicted files live.
-export default function KnowledgeGraph() {
+function KnowledgeGraphContent() {
   const { owner, repo } = useParams()
   const [params, setParams] = useSearchParams()
   const issue = params.get('issue')
@@ -54,4 +55,10 @@ export default function KnowledgeGraph() {
       </aside>
     </div>}
   </AppLayout>
+}
+
+// The page renders once the backend has snapshotted the repository; until then the gate shows build progress.
+export default function KnowledgeGraph() {
+  const { owner, repo } = useParams()
+  return <RepositoryGate owner={owner} repo={repo}><KnowledgeGraphContent /></RepositoryGate>
 }

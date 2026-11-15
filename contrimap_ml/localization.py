@@ -28,10 +28,11 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 
+from .code_features import CODE_FEATURES, code_features
 from .corpus import is_test_path, language_of
 from .features import is_valid_candidate
 from .textfeat import extract_mentions, path_text, path_tokens, text_tokens
@@ -307,14 +308,111 @@ def baseline_scores(features: np.ndarray, rng: np.random.Generator) -> dict[str,
 # ---------------------------------------------------------------------------
 # Ranker
 # ---------------------------------------------------------------------------
+RERANK_DEPTH = 50
+RERANK_FEATURES = [*FEATURES, "stage1_score", "stage1_gap", "stage1_rank", *CODE_FEATURES]
+
+
+def rerank_inputs(stage1_features: np.ndarray, stage1_scores: np.ndarray, code_matrix: np.ndarray) -> np.ndarray:
+    """Stage-2 inputs for a shortlist already sorted by stage-1 score (best first)."""
+    n = len(stage1_scores)
+    ranks = np.log1p(np.arange(n, dtype="float32"))
+    gap = stage1_scores - (stage1_scores.max() if n else 0.0)
+    return np.hstack([stage1_features, stage1_scores[:, None], gap[:, None], ranks[:, None], code_matrix]).astype("float32")
+
+
+ContentFn = Callable[[Sequence[str]], Mapping[str, str]]
+
+LOC_SIGNALS = [
+    "loc_top1_conf", "loc_entropy_top10", "loc_dirs_top5", "loc_mention_top5", "loc_def_hit_top5", "loc_string_hit_top5",
+    "loc_top1_lines", "loc_top3_lines", "loc_top3_defs", "loc_hist_top5", "loc_repo_files", "loc_code_missing",
+]
+
+
+def localization_signals(inputs: np.ndarray, shortlist: Sequence[str], n_candidates: int) -> dict[str, float]:
+    """Summaries of a stage-1-ordered shortlist (``rerank_inputs`` rows) that describe the likely change site.
+
+    Used as difficulty/effort features: a fix whose site is obvious (a mentioned file defining the
+    named symbol) tends to be smaller than one with a diffuse, multi-directory shortlist in large files.
+    """
+    column = {name: index for index, name in enumerate(RERANK_FEATURES)}
+    signals = dict.fromkeys(LOC_SIGNALS, 0.0)
+    signals["loc_repo_files"] = math.log1p(n_candidates)
+    if not len(inputs):
+        signals["loc_code_missing"] = 1.0
+        return signals
+    top10 = inputs[:10, column["stage1_score"]].astype("float64")
+    weights = np.exp(top10 - top10.max())
+    weights /= weights.sum()
+    top5 = inputs[:5]
+    signals.update({
+        "loc_top1_conf": float(weights[0]),
+        "loc_entropy_top10": float(-(weights * np.log(weights + 1e-12)).sum() / math.log(max(len(weights), 2))),
+        "loc_dirs_top5": float(len({path.rsplit("/", 1)[0] if "/" in path else "" for path in shortlist[:5]})),
+        "loc_mention_top5": float(((top5[:, column["mention_path"]] > 0) | (top5[:, column["mention_module"]] >= 2)).any()),
+        "loc_def_hit_top5": float(top5[:, column["code_def_hits"]].max()),
+        "loc_string_hit_top5": float(top5[:, column["code_string_hit"]].max()),
+        "loc_top1_lines": float(inputs[0, column["code_lines"]]),
+        "loc_top3_lines": float(inputs[:3, column["code_lines"]].mean()),
+        "loc_top3_defs": float(inputs[:3, column["code_n_defs"]].mean()),
+        "loc_hist_top5": float(top5[:, column["hist_freq"]].mean()),
+        "loc_code_missing": float(inputs[:5, column["code_missing"]].mean()),
+    })
+    return signals
+
+
+@dataclass
+class Shortlist:
+    """Stage-1 state for one issue: candidates, their features and the stage-1 order of the kept ones."""
+
+    text: str
+    candidates: list[str]
+    features: np.ndarray
+    kept: np.ndarray
+    stage1: np.ndarray
+    paths: list[str]
+
+
 @dataclass
 class LocalizationModel:
+    """Stage 1: LambdaRank over path/text/history features for every file.
+
+    Stage 2 (optional, ``reranker``): reads the contents of the stage-1 top
+    ``rerank_depth`` files (``code_features``) and re-orders them.  Models
+    pickled before stage 2 existed load with ``reranker = None``.
+    """
+
     ranker: Any
     features: list[str] = field(default_factory=lambda: list(FEATURES))
     metadata: dict[str, Any] = field(default_factory=dict)
+    reranker: Any = None
+    rerank_depth: int = RERANK_DEPTH
 
     def score(self, features: np.ndarray) -> np.ndarray:
         return np.asarray(self.ranker.predict(features), dtype="float64")
+
+    def shortlist(
+        self,
+        title: str,
+        body: str,
+        files: Iterable[str],
+        query_embedding: np.ndarray,
+        cache: PathFeatureCache,
+        history: RepoHistory | None = None,
+        repo_language: str | None = None,
+    ) -> "Shortlist":
+        """Stage 1: score every candidate file; ``Shortlist.paths`` are the files stage 2 would read."""
+        candidates = localization_candidates(files)
+        text = f"{title}\n{body}".strip()
+        if not candidates:
+            return Shortlist(text, [], np.zeros((0, len(FEATURES)), dtype="float32"), np.zeros(0, dtype=int), np.zeros(0), [])
+        stats = history.stats(query_embedding, None) if history is not None else None
+        features = candidate_features(text, query_embedding, candidates, cache, stats, repo_language)
+        kept = prefilter(features)
+        stage1 = self.score(features[kept])
+        order = np.argsort(-stage1, kind="stable")
+        kept, stage1 = kept[order], stage1[order]
+        depth = min(getattr(self, "rerank_depth", RERANK_DEPTH), len(kept))
+        return Shortlist(text, candidates, features, kept, stage1, [candidates[int(i)] for i in kept[:depth]])
 
     def rank(
         self,
@@ -326,33 +424,65 @@ class LocalizationModel:
         history: RepoHistory | None = None,
         repo_language: str | None = None,
         top_k: int = 10,
-    ) -> list[dict[str, Any]]:
-        candidates = localization_candidates(files)
+        content_fn: ContentFn | None = None,
+        with_signals: bool = False,
+    ) -> Any:
+        """Top ``top_k`` files; with ``content_fn`` (paths -> contents) and a stage-2 model, file contents are read.
+
+        With ``with_signals`` returns ``(files, localization_signals)`` for the difficulty/effort models.
+        """
+        state = self.shortlist(title, body, files, query_embedding, cache, history, repo_language)
+        contents: Mapping[str, str] = {}
+        if content_fn is not None and state.paths:
+            try:
+                contents = content_fn(state.paths) or {}
+            except Exception as error:  # network / git failures degrade to stage 1
+                logger.warning("Could not read file contents for re-ranking: %s", error)
+        return self.finish(state, contents, top_k, with_signals)
+
+    def finish(self, state: "Shortlist", contents: Mapping[str, str], top_k: int = 10, with_signals: bool = False) -> Any:
+        """Stage 2 (when contents and a re-ranker are available) and the public result rows."""
+        candidates, features, kept, stage1, shortlist = state.candidates, state.features, state.kept, state.stage1, state.paths
         if not candidates:
-            return []
-        text = f"{title}\n{body}".strip()
-        stats = history.stats(query_embedding, None) if history is not None else None
-        features = candidate_features(text, query_embedding, candidates, cache, stats, repo_language)
-        kept = prefilter(features)
-        scores = self.score(features[kept])
-        order = kept[np.argsort(-scores)][:top_k]
-        top = np.sort(scores)[::-1][:top_k]
+            return ([], localization_signals(np.zeros((0, len(RERANK_FEATURES))), [], 0)) if with_signals else []
+        depth = len(shortlist)
+        code_matrix = code_features(state.text, shortlist, contents)
+        inputs = rerank_inputs(features[kept[:depth]], stage1[:depth].astype("float32"), code_matrix)
+        signals = localization_signals(inputs, shortlist, len(candidates))
+        code_rows: np.ndarray | None = code_matrix if contents else None
+        scores = stage1
+        reranked = False
+        reranker = getattr(self, "reranker", None)
+        if reranker is not None and contents:
+            second = np.asarray(reranker.predict(inputs), dtype="float64")
+            order = np.argsort(-second, kind="stable")
+            kept = np.concatenate([kept[:depth][order], kept[depth:]])
+            code_rows = code_matrix[order]
+            scores = np.concatenate([second[order], stage1[depth:]])
+            reranked = True
+        order_idx = kept[:top_k]
+        top = np.asarray(scores[:top_k], dtype="float64")
         # Softmax over the shortlist gives a relative, not calibrated, confidence.
         weights = np.exp(top - top.max())
         weights = weights / weights.sum()
         column = {name: index for index, name in enumerate(FEATURES)}
+        code_column = {name: index for index, name in enumerate(CODE_FEATURES)}
         results = []
-        for rank, (index, score, weight) in enumerate(zip(order, top, weights), 1):
+        for rank, (index, score, weight) in enumerate(zip(order_idx, top, weights), 1):
             row = features[index]
-            signals = [name for name, flag in (
+            code = code_rows[rank - 1] if code_rows is not None and rank - 1 < len(code_rows) else None
+            evidence = [name for name, flag in (
                 ("mentioned in issue", row[column["mention_path"]] or row[column["mention_basename"]] or row[column["mention_module"]] >= 2),
+                ("defines a symbol named in the issue", code is not None and code[code_column["code_def_hits"]] > 0),
+                ("contains text quoted in the issue", code is not None and code[code_column["code_string_hit"]] > 0),
                 ("name matches issue terms", row[column["mention_stem"]] or row[column["bm25_rel"]] > 0.6),
+                ("code matches issue terms", code is not None and code[code_column["code_bm25_rel"]] > 0.8),
                 ("semantically similar", row[column["emb_pct"]] > 0.97),
                 ("changed by similar past issues", row[column["knn_max"]] > 0),
                 ("frequently changed", row[column["hist_freq"]] >= math.log1p(3)),
             ) if flag]
-            results.append({"path": candidates[int(index)], "rank": rank, "score": float(score), "relative_confidence": float(weight), "signals": signals})
-        return results
+            results.append({"path": candidates[int(index)], "rank": rank, "score": float(score), "relative_confidence": float(weight), "signals": evidence, "code_read": reranked})
+        return (results, signals) if with_signals else results
 
 
 RANKER_CONFIGS = [
@@ -406,6 +536,7 @@ def ranking_metrics(ranked_lists: list[list[str]], targets: list[set[str]], cand
 
 
 __all__ = [
-    "FEATURES", "LocalizationModel", "PathFeatureCache", "RepoHistory", "baseline_scores", "candidate_features",
-    "RANKER_CONFIGS", "localization_candidates", "prefilter", "ranking_metrics", "train_ranker",
+    "FEATURES", "LOC_SIGNALS", "LocalizationModel", "PathFeatureCache", "Shortlist", "RepoHistory", "baseline_scores", "candidate_features",
+    "RANKER_CONFIGS", "RERANK_DEPTH", "RERANK_FEATURES", "localization_candidates", "prefilter", "ranking_metrics",
+    "localization_signals", "rerank_inputs", "train_ranker",
 ]

@@ -24,7 +24,9 @@ export default function ModelCard() {
   const loc = data?.localization || {}
   const locRows = key => {
     const block = loc[key] || {}
-    return [['ContriMap ranker', block.model?.['acc@1'], block.model?.['acc@5'], block.model?.['acc@10'], block.model?.mrr],
+    const code = loc.code_reranker?.selected ? loc.code_reranker[key]?.model : null
+    return [...(code ? [['ContriMap + code reading (shipped)', code['acc@1'], code['acc@5'], code['acc@10'], code.mrr]] : []),
+      [code ? 'ContriMap stage 1 (paths, text, history)' : 'ContriMap ranker', block.model?.['acc@1'], block.model?.['acc@5'], block.model?.['acc@10'], block.model?.mrr],
       ...['legacy_formula', 'bm25', 'embedding', 'similar_issues_knn', 'history_frequency', 'random'].filter(name => block[`baseline_${name}`]).map(name => [name.replace(/_/g, ' '), block[`baseline_${name}`]['acc@1'], block[`baseline_${name}`]['acc@5'], block[`baseline_${name}`]['acc@10'], block[`baseline_${name}`].mrr])]
   }
   return <><Navbar /><main className="mx-auto max-w-5xl px-5 py-12">
@@ -40,7 +42,7 @@ export default function ModelCard() {
       {d.effort && <Section title="Effort estimation (hours, human-calibrated)" note={`${d.effort.evaluation}. Text-only effort prediction carries weak signal; treat estimates as rough buckets.`}>
         <Table columns={['Model', 'Bucket accuracy', 'Spearman vs human', 'MAE (levels)']} rows={[['ContriMap', d.effort.bucket_accuracy, d.effort.spearman_expected_hours_vs_human, d.effort.bucket_mae_levels], ['majority bucket', d.effort.baseline_majority_bucket_accuracy, null, d.effort.baseline_majority_bucket_mae_levels]]} />
       </Section>}
-      {['test_verified_tree', 'multilingual_tree', 'nextjs_history_last20pct'].filter(key => loc[key]).map(key => <Section key={key} title={`File localization - ${key.replace(/_/g, ' ')}`} note={`acc@k = at least one changed file in the top k. Median ${loc[key].median_candidates} candidate files per issue; oracle coverage ${f(loc[key].model.oracle_candidate_coverage)} (files created by the fix cannot be predicted).`}>
+      {['test_verified_tree', 'multilingual_tree', 'test_verified_nohist', 'multilingual_nohist', 'nextjs_history_last20pct'].filter(key => loc[key]).map(key => <Section key={key} title={`File localization - ${key.replace(/_nohist$/, ' without repository history').replace(/_/g, ' ')}`} note={key.endsWith('_nohist') ? 'Same issues with history features switched off - how the service runs for repositories without ingested resolved-issue history.' : `acc@k = at least one changed file in the top k. Median ${loc[key].median_candidates} candidate files per issue; oracle coverage ${f(loc[key].model?.oracle_candidate_coverage)} (files created by the fix cannot be predicted).`}>
         <Table columns={['Method', 'acc@1', 'acc@5', 'acc@10', 'MRR']} rows={locRows(key)} />
       </Section>)}
       {data.issue_ranking_actionability && <Section title="Issue ranking - actionability" note={data.issue_ranking_actionability.caveat}>

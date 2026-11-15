@@ -8,10 +8,11 @@ import ErrorMessage from '../components/ErrorMessage'
 import Loading from '../components/Loading'
 import RankedIssueCard from '../components/RankedIssueCard'
 import { useAsync, useProfile } from '../hooks/useProfile'
+import RepositoryGate from '../components/RepositoryGate'
 
 const MODES = [['balanced', 'Balanced'], ['learning', 'Learn something new'], ['quick_win', 'Quick win']]
 
-export default function IssueExplorer() {
+function IssueExplorerContent() {
   const { owner, repo } = useParams()
   const { profile, isSet } = useProfile()
   const [personal, setPersonal] = useState(isSet)
@@ -39,4 +40,10 @@ export default function IssueExplorer() {
       {!filtered.length && <div className="mt-4"><EmptyState message="No issues match your filters." /></div>}
     </>}
   </AppLayout>
+}
+
+// The page renders once the backend has snapshotted the repository; until then the gate shows build progress.
+export default function IssueExplorer() {
+  const { owner, repo } = useParams()
+  return <RepositoryGate owner={owner} repo={repo}><IssueExplorerContent /></RepositoryGate>
 }

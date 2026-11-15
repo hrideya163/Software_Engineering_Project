@@ -112,6 +112,17 @@ def trending(language: str | None = None, limit: int = 12) -> dict[str, Any]:
     return service.trending(language, max(1, min(limit, 30)))
 
 
+@app.post("/api/repos/{owner}/{repo}/prepare")
+def prepare(owner: str, repo: str) -> dict[str, Any]:
+    """Start snapshotting the repository and building its graph in the background; poll ``/status``."""
+    return service.prepare_repository(*_repo(owner, repo))
+
+
+@app.get("/api/repos/{owner}/{repo}/status")
+def preparation_status(owner: str, repo: str) -> dict[str, Any]:
+    return service.preparation_status(*_repo(owner, repo))
+
+
 @app.get("/api/repos/{owner}/{repo}")
 def repository(owner: str, repo: str) -> dict[str, Any]:
     return service.repository_overview(*_repo(owner, repo))
@@ -178,12 +189,22 @@ def contributor(login: str) -> dict[str, Any]:
 @app.post("/api/recommendations")
 def recommendations(request: RecommendationRequest) -> dict[str, Any]:
     """Personalised issues across several repositories, merged by score."""
+    from concurrent.futures import ThreadPoolExecutor
+
     merged: list[dict[str, Any]] = []
     errors: dict[str, str] = {}
-    for full_name in request.repositories:
+    profile = _profile(request.profile)
+
+    def rank_repository(full_name: str) -> dict[str, Any]:
         owner, _, repo = full_name.partition("/")
+        return service.ranked_issues(*_repo(owner, repo), profile, request.mode, request.per_repository)
+
+    # Repositories are independent (git snapshots, issue lists), so they are ranked concurrently.
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = {full_name: pool.submit(rank_repository, full_name) for full_name in dict.fromkeys(request.repositories)}
+    for full_name, future in futures.items():
         try:
-            result = service.ranked_issues(*_repo(owner, repo), _profile(request.profile), request.mode, request.per_repository)
+            result = future.result()
         except (service.GitHubError, HTTPException) as error:
             errors[full_name] = str(getattr(error, "detail", error))
             continue

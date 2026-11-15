@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
@@ -81,6 +81,9 @@ class DifficultyModel:
     effort_model: LogisticRegression | None = None
     effort_scaler: StandardScaler | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Optional heads that also use localization/code signals (``LOC_SIGNALS``); None in older pickles.
+    structural: dict[str, Any] | None = None
+    effort_structural: dict[str, Any] | None = None
 
     # -- feature construction -------------------------------------------------
     def _linear_inputs(self, frame: pd.DataFrame, hand: np.ndarray):
@@ -90,16 +93,26 @@ class DifficultyModel:
     def _dense_inputs(hand: np.ndarray, embeddings: np.ndarray) -> np.ndarray:
         return np.hstack([hand, embeddings])
 
-    def predict_frame(self, frame: pd.DataFrame, embeddings: np.ndarray | None = None) -> dict[str, np.ndarray]:
+    def predict_frame(self, frame: pd.DataFrame, embeddings: np.ndarray | None = None, loc_signals: np.ndarray | None = None) -> dict[str, np.ndarray]:
+        """Text predictions; with ``loc_signals`` (rows of ``LOC_SIGNALS``) the structural heads refine them."""
         hand = handcrafted_matrix(frame)
         if embeddings is None:
             embeddings = embed(frame.text.fillna("").tolist())
         dense = self._dense_inputs(hand, embeddings)
-        probabilities = self.blend * self.linear.predict_proba(self._linear_inputs(frame, hand)) + (1 - self.blend) * self.boosted.predict_proba(dense)
+        text_proba = self.blend * self.linear.predict_proba(self._linear_inputs(frame, hand)) + (1 - self.blend) * self.boosted.predict_proba(dense)
         size = self.size_regressor.predict(dense)
-        output = {"proba": probabilities, "size": size, "label": probabilities.argmax(axis=1)}
-        if self.effort_model is not None:
-            output["effort_proba"] = self.effort_model.predict_proba(self.effort_scaler.transform(_effort_inputs(probabilities, size)))
+        structural = getattr(self, "structural", None)
+        effort_structural = getattr(self, "effort_structural", None)
+        probabilities = text_proba
+        output: dict[str, Any] = {"text_proba": text_proba, "size": size, "uses_code_signals": False}
+        if loc_signals is not None and structural is not None:
+            probabilities = _head_predict(structural, _stack_inputs(text_proba, size, loc_signals))
+            output["uses_code_signals"] = True
+        output.update({"proba": probabilities, "label": probabilities.argmax(axis=1)})
+        if loc_signals is not None and effort_structural is not None:
+            output["effort_proba"] = _head_predict(effort_structural, np.hstack([_effort_inputs(text_proba, size), loc_signals]))
+        elif self.effort_model is not None:
+            output["effort_proba"] = self.effort_model.predict_proba(self.effort_scaler.transform(_effort_inputs(text_proba, size)))
         return output
 
     def predict_one(self, title: str, body: str = "", labels: list[str] | None = None) -> dict[str, Any]:
@@ -121,6 +134,30 @@ class DifficultyModel:
 
 def _effort_inputs(probabilities: np.ndarray, size: np.ndarray) -> np.ndarray:
     return np.column_stack([size, probabilities[:, 0], probabilities[:, 2]])
+
+
+def _stack_inputs(probabilities: np.ndarray, size: np.ndarray, signals: np.ndarray | None = None) -> np.ndarray:
+    base = np.column_stack([np.log(np.clip(probabilities, 1e-6, 1.0)), size])
+    return base if signals is None else np.hstack([base, signals])
+
+
+def _fit_head(x: np.ndarray, y: np.ndarray, c: float = 0.3, balanced: bool = True) -> dict[str, Any]:
+    scaler = StandardScaler().fit(x)
+    classifier = LogisticRegression(C=c, max_iter=2000, class_weight="balanced" if balanced else None).fit(scaler.transform(x), y)
+    return {"scaler": scaler, "classifier": classifier}
+
+
+def _head_predict(head: Mapping[str, Any], x: np.ndarray, n_classes: int = 3) -> np.ndarray:
+    proba = np.zeros((len(x), n_classes))
+    proba[:, head["classifier"].classes_] = head["classifier"].predict_proba(head["scaler"].transform(x))
+    return proba
+
+
+def _grouped_oof(x: np.ndarray, y: np.ndarray, groups: np.ndarray, folds: int = 5, **head_kwargs: Any) -> np.ndarray:
+    oof = np.zeros((len(x), 3))
+    for fit_idx, val_idx in GroupKFold(n_splits=folds).split(x, y, groups=groups):
+        oof[val_idx] = _head_predict(_fit_head(x[fit_idx], y[fit_idx], **head_kwargs), x[val_idx])
+    return oof
 
 
 def effort_from_distribution(distribution: np.ndarray, classes: list[int]) -> dict[str, Any]:
@@ -194,6 +231,7 @@ def train_difficulty(corpus: pd.DataFrame, embeddings: np.ndarray, seed: int = 4
     # Model selection: repository-grouped CV on the training repositories only.
     blends = [0.0, 0.3, 0.5, 0.7, 1.0]
     oof = {blend: np.zeros((len(train), 3)) for blend in blends}
+    oof_size = np.zeros(len(train))
     for fold, (fit_idx, val_idx) in enumerate(GroupKFold(n_splits=5).split(train, y, groups=train.repo)):
         fold_model = _fit_components(train.iloc[fit_idx], train_hand[fit_idx], train_emb[fit_idx], y[fit_idx], size_target[fit_idx], 0.5, thresholds)
         val = train.iloc[val_idx]
@@ -202,12 +240,15 @@ def train_difficulty(corpus: pd.DataFrame, embeddings: np.ndarray, seed: int = 4
         for blend in blends:
             oof[blend][val_idx] = blend * linear + (1 - blend) * boosted
         logger.info("Difficulty CV fold %d done", fold + 1)
+        oof_size[val_idx] = fold_model.size_regressor.predict(fold_model._dense_inputs(train_hand[val_idx], train_emb[val_idx]))
     cv = {str(blend): float(f1_score(y, oof[blend].argmax(1), average="macro")) for blend in blends}
     best_blend = float(max(blends, key=lambda blend: cv[str(blend)]))
     logger.info("Difficulty grouped-CV macro-F1 by linear blend weight: %s (best %.1f)", cv, best_blend)
 
     model = _fit_components(train, train_hand, train_emb, y, size_target, best_blend, thresholds)
     model.metadata = {"cv_macro_f1_by_blend": cv, "train_records": int(len(train)), "train_repositories": int(train.repo.nunique()), "thresholds": thresholds}
+    # Out-of-fold text predictions for the training issues: inputs of the structural stacker (never in-sample).
+    model.oof_ = pd.DataFrame({"uid": train.uid.to_numpy(), "p0": oof[best_blend][:, 0], "p1": oof[best_blend][:, 1], "p2": oof[best_blend][:, 2], "size": oof_size, "label": y})
 
     metrics: dict[str, Any] = {"label_definition": "tertiles of log1p(LOC)+log1p(files) of non-test changes on train repositories", "thresholds": thresholds, "grouped_cv_macro_f1": cv, "selected_linear_blend": best_blend}
     for group in ("dev", "test", "multilingual"):
@@ -274,4 +315,105 @@ def train_effort(model: DifficultyModel, corpus: pd.DataFrame, embeddings: np.nd
     return metrics
 
 
-__all__ = ["DIFFICULTY_CLASSES", "DifficultyModel", "change_scale", "effort_from_distribution", "train_difficulty", "train_effort"]
+def _signal_matrix(signals: pd.DataFrame, uids: pd.Series) -> tuple[np.ndarray, np.ndarray]:
+    """Rows of ``LOC_SIGNALS`` aligned to ``uids`` and a mask of which uids have signals."""
+    from .localization import LOC_SIGNALS
+
+    indexed = signals.drop_duplicates("uid").set_index("uid")
+    mask = uids.isin(indexed.index).to_numpy()
+    matrix = indexed.reindex(uids[mask])[LOC_SIGNALS].to_numpy(dtype="float64")
+    return matrix, mask
+
+
+def train_structural(model: DifficultyModel, corpus: pd.DataFrame, embeddings: np.ndarray, signals: pd.DataFrame) -> dict[str, Any]:
+    """Difficulty from text *and* localization/code signals ("where the fix lands" and how big those files are).
+
+    Stacker inputs: out-of-fold text probabilities and size prediction plus ``LOC_SIGNALS``. The same
+    stacker without the signals is the controlled baseline. Selected by repository-grouped CV on the
+    training repositories; evaluated on unseen repositories, on the same issues for both variants.
+    """
+    oof = getattr(model, "oof_", None)
+    if oof is None or signals.empty:
+        return {"skipped": "no out-of-fold text predictions or localization signals"}
+    matrix, mask = _signal_matrix(signals, oof.uid)
+    train = oof[mask].reset_index(drop=True)
+    groups = corpus.set_index("uid").repo.reindex(train.uid).to_numpy()
+    proba, size, y = train[["p0", "p1", "p2"]].to_numpy(), train["size"].to_numpy(), train["label"].to_numpy()
+    variants = {"text_stacker": _stack_inputs(proba, size), "text_plus_code_signals": _stack_inputs(proba, size, matrix)}
+    cv = {name: float(f1_score(y, _grouped_oof(x, y, groups).argmax(1), average="macro")) for name, x in variants.items()}
+    cv["text_model_oof"] = float(f1_score(y, proba.argmax(1), average="macro"))
+    metrics: dict[str, Any] = {"train_issues": int(len(train)), "train_repositories": int(len(set(groups))), "grouped_cv_macro_f1": cv}
+    head = _fit_head(variants["text_plus_code_signals"], y)
+
+    scale_all = change_scale(corpus).to_numpy()
+    labels_all = np.digitize(scale_all, model.thresholds)
+    sized = (corpus.loc_changed.notna() & corpus.n_files.notna()).to_numpy()
+    for group in ("dev", "test", "multilingual"):
+        rows = corpus[(corpus.eval_group == group).to_numpy() & sized]
+        group_signals, has = _signal_matrix(signals, rows.uid)
+        if not has.any():
+            continue
+        frame = rows[has].reset_index(drop=True)
+        positions = np.flatnonzero((corpus.eval_group == group).to_numpy() & sized)[has]
+        result = model.predict_frame(frame, embeddings[positions])
+        truth = labels_all[positions]
+        structural = _head_predict(head, _stack_inputs(result["text_proba"], result["size"], group_signals))
+        metrics[group] = {
+            "n": int(len(frame)),
+            "text_only": _classification_metrics(truth, result["text_proba"].argmax(1), result["text_proba"] @ np.array([0.0, 1.0, 2.0]), scale_all[positions]),
+            "text_plus_code_signals": _classification_metrics(truth, structural.argmax(1), structural @ np.array([0.0, 1.0, 2.0]), scale_all[positions]),
+        }
+        if frame.human_level.notna().any():
+            human = frame.human_level.notna().to_numpy()
+            metrics[group]["spearman_vs_human_time_to_fix"] = {
+                "text_only": float(spearmanr(result["text_proba"][human] @ np.array([0.0, 1.0, 2.0]), frame.human_level[human]).statistic),
+                "text_plus_code_signals": float(spearmanr(structural[human] @ np.array([0.0, 1.0, 2.0]), frame.human_level[human]).statistic),
+            }
+    # Ship only if it wins on grouped CV *and* on the dev repositories (the model-selection split; test is never used).
+    dev = metrics.get("dev")
+    selected = cv["text_plus_code_signals"] > max(cv["text_stacker"], cv["text_model_oof"]) and (dev is None or dev["text_plus_code_signals"]["macro_f1"] > dev["text_only"]["macro_f1"])
+    metrics["selected"] = bool(selected)
+    metrics["selection_rule"] = "grouped-CV macro-F1 above both text baselines and dev macro-F1 above text-only"
+    if selected:
+        model.structural = {**head, "columns": "stack_inputs+LOC_SIGNALS"}
+    return metrics
+
+
+def train_effort_structural(model: DifficultyModel, corpus: pd.DataFrame, embeddings: np.ndarray, signals: pd.DataFrame) -> dict[str, Any]:
+    """Effort calibrator with localization/code signals, compared with the text-only calibrator on the same CV folds."""
+    rows = corpus[corpus.human_level.notna().to_numpy()]
+    matrix, has = _signal_matrix(signals, rows.uid)
+    if has.sum() < 100:
+        return {"skipped": f"only {int(has.sum())} human-labelled issues have localization signals"}
+    frame = rows[has].reset_index(drop=True)
+    positions = np.flatnonzero(corpus.human_level.notna().to_numpy())[has]
+    levels = np.minimum(frame.human_level.to_numpy().astype(int), 2)
+    result = model.predict_frame(frame, embeddings[positions])
+    text_inputs = _effort_inputs(result["text_proba"], result["size"])
+    groups = frame.repo.to_numpy()
+    hours_true = np.array([HUMAN_DIFFICULTY_HOURS[int(level)] for level in frame.human_level])
+    level_hours = np.log(np.array([HUMAN_DIFFICULTY_HOURS[level] for level in (0, 1, 2)]))
+    metrics: dict[str, Any] = {"n": int(len(frame)), "repositories": int(len(set(groups))), "evaluation": "5-fold repository-grouped CV on SWE-bench Verified human annotations (same folds for both variants)"}
+    oofs = {}
+    for name, x in (("text_only", text_inputs), ("text_plus_code_signals", np.hstack([text_inputs, matrix]))):
+        oof = _grouped_oof(x, levels, groups, c=1.0 if name == "text_only" else 0.1, balanced=False)
+        oofs[name] = oof
+        metrics[name] = {
+            "bucket_accuracy": float(accuracy_score(levels, oof.argmax(1))),
+            "bucket_macro_f1": float(f1_score(levels, oof.argmax(1), average="macro")),
+            "spearman_expected_hours_vs_human": float(spearmanr(oof @ level_hours, hours_true).statistic),
+            "log_loss": float(-np.mean(np.log(np.clip(oof[np.arange(len(levels)), levels], 1e-9, 1)))),
+        }
+    metrics["baseline_majority_bucket_accuracy"] = float((levels == np.bincount(levels).argmax()).mean())
+    # Proper scoring rule decides; a richer model must also not lose rank correlation.
+    selected = metrics["text_plus_code_signals"]["log_loss"] < metrics["text_only"]["log_loss"] and metrics["text_plus_code_signals"]["spearman_expected_hours_vs_human"] >= metrics["text_only"]["spearman_expected_hours_vs_human"]
+    metrics["selected"] = bool(selected)
+    if selected:
+        model.effort_structural = _fit_head(np.hstack([text_inputs, matrix]), levels, c=0.1, balanced=False)
+    return metrics
+
+
+__all__ = [
+    "DIFFICULTY_CLASSES", "DifficultyModel", "change_scale", "effort_from_distribution", "train_difficulty", "train_effort",
+    "train_effort_structural", "train_structural",
+]

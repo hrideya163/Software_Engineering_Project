@@ -26,6 +26,8 @@ def _table(header: list[str], rows: list[list[Any]]) -> str:
 
 def render(report: dict[str, Any], legacy: dict[str, Any] | None = None) -> str:
     out = ["# ContriMap evaluation report", "", f"Generated from `artifacts/v2/evaluation_report.json` ({report.get('generated_at', 'unknown time')}). Regenerate with `python -m contrimap_ml.report`.", ""]
+    if report.get("data_note"):
+        out += [f"> {report['data_note']}", ""]
     corpus = report.get("corpus", {})
     if corpus:
         out += ["## Data", "", f"{corpus['records']} resolved issues from {corpus['repositories']} repositories.", "",
@@ -68,6 +70,54 @@ def render(report: dict[str, Any], legacy: dict[str, Any] | None = None) -> str:
             out += [f"Legacy model on its own next.js temporal split (history candidates, all changed files as targets): recall@5 {_f(legacy.get('recall_at_5'))}, recall@10 {_f(legacy.get('recall_at_10'))}, MRR {_f(legacy.get('mrr'))} - not directly comparable (different target definition and candidate set), and it could not localize in any other repository.", ""]
         importance = loc.get("feature_importance_gain", {})
         out += ["Top ranker features by gain: " + ", ".join(f"{name} ({value:.2f})" for name, value in list(importance.items())[:8]) + ".", ""]
+        rerank = loc.get("code_reranker")
+        if rerank:
+            out += ["### Stage 2: reading the code of the shortlist", "",
+                    f"The stage-1 top {rerank['depth']} files are read at the issue's base commit and re-ranked with code features (definitions of symbols named in the issue, quoted error strings, BM25 over identifiers). "
+                    f"Training shortlists come from cross-fitted stage-1 models (no in-sample scores); the re-ranker is kept only if it beats stage 1 on dev MRR (dev {_f(rerank['dev_stage1_mrr'])} -> {_f(rerank['dev_stage2_mrr'])}; selected: **{rerank['selected']}**).", ""]
+            rows = []
+            for key in ("dev", "test_verified_tree", "multilingual_tree"):
+                if key in rerank and key in loc:
+                    first, second = loc[key]["model"], rerank[key]["model"]
+                    rows += [[f"{key} - stage 1 (paths/text/history)", first["acc@1"], first["acc@5"], first["acc@10"], first["mrr"]],
+                             [f"**{key} - stage 2 (+ code)**", second["acc@1"], second["acc@5"], second["acc@10"], second["mrr"]]]
+            out += [_table(["Split / model", "acc@1", "acc@5", "acc@10", "MRR"], rows), "",
+                    "Top re-ranker features by gain: " + ", ".join(f"{name} ({value:.2f})" for name, value in list(rerank.get("feature_importance_gain", {}).items())[:8]) + ".", ""]
+    comparison = report.get("localization_comparison")
+    if comparison:
+        out += ["### With and without repository history", "",
+                "Same cached issues and candidates scored by each saved model (`python -m contrimap_ml.compare_localization`). "
+                "`*_nohist` splits switch repository-history features off - the situation of most repositories analysed live, which have no ingested resolved-issue history.", ""]
+        rows = []
+        for model_name, splits in comparison.items():
+            for split, stages in splits.items():
+                for stage, m in stages.items():
+                    rows.append([f"{model_name} · {split} · {stage}", m["acc@1"], m["acc@5"], m["acc@10"], m["mrr"]])
+        out += [_table(["Model · split · stage", "acc@1", "acc@5", "acc@10", "MRR"], rows), ""]
+    structural = (d or {}).get("structural")
+    if structural and "grouped_cv_macro_f1" in structural:
+        cv = structural["grouped_cv_macro_f1"]
+        out += ["## Difficulty with localization and code signals", "",
+                f"A stacker on out-of-fold text probabilities plus {len(structural.get('signals', [])) or 12} signals describing the likely change site (shortlist confidence and spread, mentioned files, symbol definitions found, size of the top files). "
+                f"Grouped CV macro-F1 on {structural['train_issues']} training issues: text model {_f(cv['text_model_oof'])}, text-only stacker {_f(cv['text_stacker'])}, with signals {_f(cv['text_plus_code_signals'])}; selected: **{structural['selected']}**.", ""]
+        rows = []
+        for group in ("dev", "test", "multilingual"):
+            block = structural.get(group)
+            if block:
+                rows += [[f"{group} (n={block['n']}) - text only", block["text_only"]["accuracy"], block["text_only"]["macro_f1"], block["text_only"]["spearman_score_vs_true_scale"]],
+                         [f"**{group} - text + code signals**", block["text_plus_code_signals"]["accuracy"], block["text_plus_code_signals"]["macro_f1"], block["text_plus_code_signals"]["spearman_score_vs_true_scale"]]]
+        out += [_table(["Split / model", "Accuracy", "Macro-F1", "Spearman vs true size"], rows), ""]
+        human = (structural.get("test") or {}).get("spearman_vs_human_time_to_fix")
+        if human:
+            out += [f"Spearman with human time-to-fix (SWE-bench Verified): text only {_f(human['text_only'])}, with signals {_f(human['text_plus_code_signals'])}.", ""]
+        if structural.get("selection_rule"):
+            out += [f"Selection rule: {structural['selection_rule']}. {structural.get('note', '')}", ""]
+    effort_structural = (d or {}).get("effort_structural")
+    if effort_structural and "text_only" in effort_structural:
+        rows = [[name.replace("_", " "), m["bucket_accuracy"], m["bucket_macro_f1"], m["spearman_expected_hours_vs_human"], m["log_loss"]] for name, m in ((k, effort_structural[k]) for k in ("text_only", "text_plus_code_signals"))]
+        rows.append(["majority bucket", effort_structural["baseline_majority_bucket_accuracy"], None, None, None])
+        out += ["## Effort with localization and code signals", "", f"{effort_structural['evaluation']} (n={effort_structural['n']}). Selected (lower log-loss without losing rank correlation): **{effort_structural['selected']}**.", "",
+                _table(["Calibrator", "Bucket accuracy", "Macro-F1", "Spearman vs human hours", "Log-loss"], rows), ""]
     action = report.get("issue_ranking_actionability")
     if action:
         out += ["## Issue ranking - actionability component", "", f"{action['dataset']}; temporal split (train {action['train']}, test {action['test']}, positive rate {_f(action['test_positive_rate'])}).", "",
@@ -109,10 +159,16 @@ def render(report: dict[str, Any], legacy: dict[str, Any] | None = None) -> str:
 
 
 def main() -> None:
-    report = json.loads((ROOT / "artifacts" / "v2" / "evaluation_report.json").read_text(encoding="utf-8"))
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Render an evaluation report as Markdown")
+    parser.add_argument("--report", default=str(ROOT / "artifacts" / "v2" / "evaluation_report.json"))
+    parser.add_argument("--output", default=str(ROOT / "docs" / "EVALUATION.md"))
+    args = parser.parse_args()
+    report = json.loads(Path(args.report).read_text(encoding="utf-8"))
     legacy_path = ROOT / "artifacts" / "evaluation_metrics.json"
     legacy = json.loads(legacy_path.read_text(encoding="utf-8")).get("localization") if legacy_path.exists() else None
-    target = ROOT / "docs" / "EVALUATION.md"
+    target = Path(args.output)
     target.parent.mkdir(exist_ok=True)
     target.write_text(render(report, legacy), encoding="utf-8")
     print(f"Wrote {target}")

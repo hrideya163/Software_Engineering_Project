@@ -9,6 +9,7 @@ import RankedIssueCard from '../components/RankedIssueCard'
 import SkillTag from '../components/SkillTag'
 import { useAsync, useProfile } from '../hooks/useProfile'
 import { compact } from '../utils/formatters'
+import RepositoryGate from '../components/RepositoryGate'
 
 const PALETTE = ['#2d7ef7', '#0eaa7d', '#f59e0b', '#7c3aed', '#ef4444', '#06b6d4', '#64748b', '#ec4899']
 
@@ -16,7 +17,7 @@ function Stat({ icon: Icon, label, value }) {
   return <div className="card p-4"><Icon size={18} className="text-blue-700" /><p className="mt-3 text-2xl font-extrabold">{value}</p><p className="text-xs font-bold text-slate-500">{label}</p></div>
 }
 
-export default function RepositoryDashboard() {
+function RepositoryDashboardContent() {
   const { owner, repo } = useParams()
   const { profile } = useProfile()
   const overview = useAsync(() => getRepositoryOverview(owner, repo), [owner, repo])
@@ -75,4 +76,10 @@ export default function RepositoryDashboard() {
       <div className="mt-4 grid gap-4 xl:grid-cols-2">{ranked.data?.issues.slice(0, 6).map(item => <RankedIssueCard item={item} owner={owner} repo={repo} weights={ranked.data.weights} key={item.issue.number} />)}</div>
     </section>
   </AppLayout>
+}
+
+// The page renders once the backend has snapshotted the repository; until then the gate shows build progress.
+export default function RepositoryDashboard() {
+  const { owner, repo } = useParams()
+  return <RepositoryGate owner={owner} repo={repo}><RepositoryDashboardContent /></RepositoryGate>
 }

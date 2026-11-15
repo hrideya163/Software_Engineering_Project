@@ -47,3 +47,16 @@ python -m contrimap_ml.ingest <owner/repo ...> --since 2022-01-01 --max-prs 400 
 Training-only repositories are filtered against every evaluation group before use, and ingested repositories also provide history features to the live service.
 
 **Label change:** the difficulty size proxy is now `log1p(LOC) + log1p(files)`. Dropping hunks keeps the same agreement with human time-to-fix (Spearman 0.525 vs 0.524) and makes GraphQL-ingested PRs, which have no hunk counts, usable for training.
+
+## Localization trees and code (v2.2)
+
+| Directory | Contents | Use |
+|---|---|---|
+| `data/trees/<owner>__<repo>/<sha>.txt` | File list of a repository at one commit | Localization candidates. `python -m contrimap_ml.prepare_data` fetches them for every dev / SWE-bench Verified / multilingual issue and a seeded sample of at most 120 training issues per repository (about 4,000 training issues from 35 repositories). |
+| `data/trees/_git/<owner>__<repo>` | Blobless, shallow partial clones | Commits are fetched 40 per request; the file *contents* of each stage-1 shortlist (top 50) are downloaded in batched requests and stay in the local object store. |
+| `data/processed/localization_featurized*.joblib` | Cached stage-1 features (with and without repository history) | Re-training stage 2 or the stackers without recomputing path embeddings. |
+| `data/processed/localization_signals.parquet` | Per-issue summaries of the localization output | Inputs of the structural difficulty / effort heads. |
+
+**Leakage controls for code reading.** File contents are read at the issue's *base commit* (the code a contributor starts from), never from the fix. Training shortlists come from stage-1 models cross-fitted by repository, so stage 2 never learns from in-sample stage-1 scores. The stage-2 model and the structural heads are kept only if they beat the simpler model on dev (and grouped CV for the heads); test repositories are never used for selection.
+
+**History and no-history variants.** Every SWE-bench issue has earlier resolved issues from its repository, so all evaluation splits used to run with history features. Most repositories analysed live have none, so each evaluation split is also featurized with history switched off (`*_nohist`) and reported separately. Training on no-history copies as augmentation was tried and did not improve dev, so the shipped model is trained with history only.

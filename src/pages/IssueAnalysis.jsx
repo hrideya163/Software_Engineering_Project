@@ -11,6 +11,7 @@ import { ScoreBars } from '../components/RankedIssueCard'
 import SkillTag from '../components/SkillTag'
 import ContributionPath from '../components/contribution/ContributionPath'
 import { useAsync, useProfile } from '../hooks/useProfile'
+import RepositoryGate from '../components/RepositoryGate'
 
 const pct = value => (value === null || value === undefined ? '-' : `${Math.round(value * 100)}%`)
 
@@ -22,7 +23,7 @@ function Distribution({ values }) {
   </div>)}</div>
 }
 
-export default function IssueAnalysis() {
+function IssueAnalysisContent() {
   const { owner, repo, issueId } = useParams()
   const { profile, isSet } = useProfile()
   const { data: a, loading, error } = useAsync(() => getIssueAnalysis(owner, repo, issueId, isSet ? profile : null), [owner, repo, issueId])
@@ -46,6 +47,7 @@ export default function IssueAnalysis() {
       <section className="card p-5">
         <p className="eyebrow">Difficulty</p>
         <div className="mt-3 flex items-center gap-3"><DifficultyBadge level={a.difficulty} /><span className="text-xs font-bold text-slate-500">{a.confidence} confidence</span></div>
+        {a.difficulty_inputs && <p className="mt-2 text-[11px] text-slate-400">Based on {a.difficulty_inputs}</p>}
         <Distribution values={a.difficulty_distribution} />
       </section>
       <section className="card p-5">
@@ -116,4 +118,10 @@ export default function IssueAnalysis() {
       </section>
     </div>
   </AppLayout>
+}
+
+// The page renders once the backend has snapshotted the repository; until then the gate shows build progress.
+export default function IssueAnalysis() {
+  const { owner, repo } = useParams()
+  return <RepositoryGate owner={owner} repo={repo}><IssueAnalysisContent /></RepositoryGate>
 }

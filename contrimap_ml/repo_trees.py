@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable
@@ -51,6 +52,11 @@ def _bare_repo(repo: str, cache_dir: Path) -> Path:
     return path
 
 
+def _has_commit(bare: Path, sha: str) -> bool:
+    check = subprocess.run(["git", "cat-file", "-t", sha], cwd=bare, capture_output=True, text=True, env={**os.environ, "GIT_NO_LAZY_FETCH": "1"}, timeout=30)
+    return check.returncode == 0 and check.stdout.strip() == "commit"
+
+
 def tree_cache_path(repo: str, sha: str, cache_dir: Path = DEFAULT_CACHE) -> Path:
     return cache_dir / repo.replace("/", "__") / f"{sha}.txt"
 
@@ -63,8 +69,11 @@ def fetch_tree(repo: str, sha: str | None = None, cache_dir: str | Path = DEFAUL
         if cached.exists():
             return sha, [line for line in cached.read_text(encoding="utf-8").splitlines() if line]
     bare = _bare_repo(repo, cache_dir)
-    _git(["fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", sha or "HEAD"], bare)
-    resolved = _git(["rev-parse", "FETCH_HEAD"], bare).strip()
+    if sha and _has_commit(bare, sha):
+        resolved = sha  # already fetched (e.g. by a batched ``fetch_trees``)
+    else:
+        _git(["fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", sha or "HEAD"], bare)
+        resolved = _git(["rev-parse", "FETCH_HEAD"], bare).strip()
     files = [line for line in _git(["ls-tree", "-r", "--name-only", resolved], bare).splitlines() if line]
     target = tree_cache_path(repo, resolved, cache_dir)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -93,10 +102,7 @@ def _parse_batch(stream: bytes) -> dict[str, bytes]:
     return blobs
 
 
-def fetch_blobs(repo: str, sha: str, paths: Iterable[str], cache_dir: str | Path = DEFAULT_CACHE, max_bytes: int = 200_000, max_file_size: int = 400_000) -> dict[str, str]:
-    """Fetch the contents of ``paths`` at ``sha`` in batched requests; oversized and binary files are skipped."""
-    bare = _bare_repo(repo, Path(cache_dir))
-    wanted = set(paths)
+def _blob_ids(bare: Path, sha: str, wanted: set[str]) -> dict[str, str]:
     listing: dict[str, str] = {}
     # Note: `ls-tree -l` would make git lazily download every blob just to report sizes.
     for line in _git(["ls-tree", "-r", sha], bare).splitlines():
@@ -104,15 +110,64 @@ def fetch_blobs(repo: str, sha: str, paths: Iterable[str], cache_dir: str | Path
         parts = meta.split()
         if path in wanted and len(parts) == 3 and parts[1] == "blob":
             listing[path] = parts[2]
+    return listing
+
+
+def _download_missing(bare: Path, oids: Iterable[str], max_file_size: int, chunk: int = 200) -> None:
+    oids = sorted(set(oids))
+    if not oids:
+        return
+    no_lazy = {**os.environ, "GIT_NO_LAZY_FETCH": "1"}
+    check = subprocess.run(["git", "cat-file", "--batch-check"], cwd=bare, input="\n".join(oids), capture_output=True, text=True, env=no_lazy, timeout=300)
+    present = {line.split()[0] for line in check.stdout.splitlines() if " blob " in line}
+    missing = [oid for oid in oids if oid not in present]
+    for start in range(0, len(missing), chunk):
+        # Object ids go through stdin: a few hundred of them exceed the Windows command-line limit.
+        _git_retry(["fetch", "-q", "--no-tags", "--stdin", f"--filter=blob:limit={max_file_size}", "origin"], bare, stdin="\n".join(missing[start:start + chunk]) + "\n", timeout=600)
+
+
+def _git_retry(args: list[str], cwd: Path, stdin: str | None = None, timeout: int = 300, attempts: int = 3) -> str:
+    """Run a network git command, retrying transient failures (connection resets, TLS handshakes)."""
+    for attempt in range(1, attempts + 1):
+        # Bytes, not text mode: on Windows text-mode pipes turn "\n" into "\r\n", which git rejects in refspecs.
+        result = subprocess.run(["git", *args], cwd=cwd, input=stdin.encode() if stdin is not None else None, capture_output=True, timeout=timeout)
+        if result.returncode == 0:
+            return result.stdout.decode("utf-8", errors="replace")
+        message = result.stderr.decode("utf-8", errors="replace").strip()[:400] or f"git {' '.join(args)} failed"
+        if attempt == attempts or not any(token in message.lower() for token in ("unable to access", "connection", "rpc failed", "early eof", "handshake", "timed out", "remote end hung up")):
+            raise TreeFetchError(message)
+        logger.info("git %s failed (attempt %d/%d), retrying: %s", args[0], attempt, attempts, message[:120])
+        time.sleep(2 * attempt)
+    raise TreeFetchError("unreachable")
+
+
+def prefetch_blobs(repo: str, requests: Iterable[tuple[str, Iterable[str]]], cache_dir: str | Path = DEFAULT_CACHE, max_file_size: int = 400_000) -> int:
+    """Download, in a few large requests, the blobs of many ``(sha, paths)`` pairs of one repository.
+
+    Later ``fetch_blobs`` calls for the same pairs are then served from the local object store.
+    Returns the number of distinct blobs requested.
+    """
+    bare = _bare_repo(repo, Path(cache_dir))
+    oids: set[str] = set()
+    for sha, paths in requests:
+        oids.update(_blob_ids(bare, sha, set(paths)).values())
+    _download_missing(bare, oids, max_file_size, chunk=1000)
+    return len(oids)
+
+
+def fetch_blobs(repo: str, sha: str, paths: Iterable[str], cache_dir: str | Path = DEFAULT_CACHE, max_bytes: int = 200_000, max_file_size: int = 400_000, download: bool = True) -> dict[str, str]:
+    """Fetch the contents of ``paths`` at ``sha`` in batched requests; oversized and binary files are skipped.
+
+    ``download=False`` reads only what is already in the local object store (after ``prefetch_blobs``).
+    """
+    bare = _bare_repo(repo, Path(cache_dir))
+    listing = _blob_ids(bare, sha, set(paths))
     if not listing:
         return {}
     oids = sorted(set(listing.values()))
+    if download:
+        _download_missing(bare, oids, max_file_size)
     no_lazy = {**os.environ, "GIT_NO_LAZY_FETCH": "1"}
-    check = subprocess.run(["git", "cat-file", "--batch-check"], cwd=bare, input="\n".join(oids), capture_output=True, text=True, env=no_lazy, timeout=120)
-    present = {line.split()[0] for line in check.stdout.splitlines() if " blob " in line}
-    missing = [oid for oid in oids if oid not in present]
-    for start in range(0, len(missing), 200):
-        _git(["fetch", "-q", "--no-tags", f"--filter=blob:limit={max_file_size}", "origin", *missing[start:start + 200]], bare, timeout=300)
     batch = subprocess.run(["git", "cat-file", "--batch"], cwd=bare, input="\n".join(oids).encode(), capture_output=True, env=no_lazy, timeout=300)
     blobs = _parse_batch(batch.stdout)
     contents: dict[str, str] = {}
@@ -124,7 +179,18 @@ def fetch_blobs(repo: str, sha: str, paths: Iterable[str], cache_dir: str | Path
     return contents
 
 
-def fetch_trees(pairs: Iterable[tuple[str, str]], cache_dir: str | Path = DEFAULT_CACHE, workers: int = 6) -> dict[tuple[str, str], list[str]]:
+def _fetch_commits(repo: str, shas: list[str], cache_dir: Path) -> None:
+    """Fetch several commits (and their trees, no blobs) in one request; ``fetch_tree`` then reads them locally."""
+    bare = _bare_repo(repo, cache_dir)
+    no_lazy = {**os.environ, "GIT_NO_LAZY_FETCH": "1"}
+    check = subprocess.run(["git", "cat-file", "--batch-check"], cwd=bare, input="\n".join(shas), capture_output=True, text=True, env=no_lazy, timeout=120)
+    present = {line.split()[0] for line in check.stdout.splitlines() if " commit " in line}
+    missing = [sha for sha in shas if sha not in present]
+    if missing:
+        _git_retry(["fetch", "-q", "--no-tags", "--depth", "1", "--filter=blob:none", "--stdin", "origin"], bare, stdin="\n".join(missing) + "\n", timeout=900)
+
+
+def fetch_trees(pairs: Iterable[tuple[str, str]], cache_dir: str | Path = DEFAULT_CACHE, workers: int = 6, batch_size: int = 40) -> dict[tuple[str, str], list[str]]:
     """Fetch many (repo, sha) trees concurrently; failures are logged and skipped."""
     unique = sorted(set(pairs))
     results: dict[tuple[str, str], list[str]] = {}
@@ -135,12 +201,19 @@ def fetch_trees(pairs: Iterable[tuple[str, str]], cache_dir: str | Path = DEFAUL
 
     def run(repo: str, shas: list[str]) -> list[tuple[tuple[str, str], list[str] | None]]:
         out = []
-        for sha in shas:
+        # One negotiation for many commits is far cheaper than one `git fetch` per commit.
+        for start in range(0, len(shas), batch_size):
+            chunk = shas[start:start + batch_size]
             try:
-                out.append(((repo, sha), fetch_tree(repo, sha, cache_dir)[1]))
+                _fetch_commits(repo, chunk, Path(cache_dir))
             except (TreeFetchError, subprocess.TimeoutExpired) as error:
-                logger.warning("Tree fetch failed for %s@%s: %s", repo, sha[:10], error)
-                out.append(((repo, sha), None))
+                logger.warning("Batched fetch failed for %s (%d commits), retrying one by one: %s", repo, len(chunk), str(error)[:200])
+            for sha in chunk:
+                try:
+                    out.append(((repo, sha), fetch_tree(repo, sha, cache_dir)[1]))
+                except (TreeFetchError, subprocess.TimeoutExpired) as error:
+                    logger.warning("Tree fetch failed for %s@%s: %s", repo, sha[:10], error)
+                    out.append(((repo, sha), None))
         return out
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -153,4 +226,4 @@ def fetch_trees(pairs: Iterable[tuple[str, str]], cache_dir: str | Path = DEFAUL
     return results
 
 
-__all__ = ["TreeFetchError", "fetch_blobs", "fetch_tree", "fetch_trees", "read_blob", "tree_cache_path"]
+__all__ = ["TreeFetchError", "fetch_blobs", "fetch_tree", "fetch_trees", "prefetch_blobs", "read_blob", "tree_cache_path"]

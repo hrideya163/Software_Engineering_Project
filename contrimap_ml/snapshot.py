@@ -4,7 +4,7 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 SOURCE_PATTERN = re.compile(r"\.(c|cc|cpp|cs|go|java|js|jsx|kt|py|rb|rs|swift|ts|tsx|vue)$", re.I)
 TEST_PATTERN = re.compile(r"(^|/)(__tests__|test|tests|spec)(/|$)|\.(test|spec)\.[^.]+$", re.I)
@@ -195,16 +195,19 @@ SNAPSHOT_DIR = Path(__file__).resolve().parent.parent / "data" / "snapshots"
 SNAPSHOT_VERSION = 2
 
 
-def build_git_snapshot(repo: str, sha: str | None = None, content_limit: int = 1500, priority: Iterable[str] = (), cache_dir: Path = SNAPSHOT_DIR) -> dict[str, Any]:
+def build_git_snapshot(repo: str, sha: str | None = None, content_limit: int = 1500, priority: Iterable[str] = (), cache_dir: Path = SNAPSHOT_DIR, progress: Callable[[str, str], None] | None = None) -> dict[str, Any]:
     """Snapshot ``owner/name`` at ``sha`` (default branch HEAD): files, imports, tests, stack, skills.
 
     Cached per commit under ``data/snapshots``; a snapshot is immutable for its sha.
+    ``progress(stage, message)`` is called as each slow step starts.
     """
+    report = progress or (lambda stage, message: None)
     from .codegraph import import_edges, is_manifest, select_content_paths, test_edges
     from .features import is_valid_candidate as _valid
     from .repo_trees import fetch_blobs, fetch_tree
     from .skills import as_public, extract_repository_skills
 
+    report("tree", "Reading the repository's file tree with git")
     resolved, all_files = fetch_tree(repo, sha)
     target = cache_dir / repo.replace("/", "__") / f"{resolved}.json"
     if target.exists():
@@ -213,7 +216,9 @@ def build_git_snapshot(repo: str, sha: str | None = None, content_limit: int = 1
             return cached
     files = [path for path in all_files if _valid(path)]
     wanted = select_content_paths(files, limit=content_limit, priority=priority)
+    report("contents", f"Downloading {len(wanted):,} of {len(files):,} files to parse imports and manifests")
     contents = fetch_blobs(repo, resolved, wanted)
+    report("imports", "Resolving imports and detecting the technology stack")
     imports = import_edges(files, contents)
     manifests = {path: content for path, content in contents.items() if is_manifest(path)}
     packages = sorted(_dependency_packages([{"content": content} for path, content in manifests.items() if path.endswith((".json", ".txt"))]) + _toml_like_packages(manifests))

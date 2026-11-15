@@ -8,7 +8,7 @@ ContriMap helps people find, understand and complete open-source contributions. 
 - **analyses an issue**: difficulty, effort, the files most likely to change (highlighted on the code graph and file tree), related tests, required skills, a step-by-step **contribution path**, and an LLM-written **explanation** grounded in those outputs;
 - builds **contributor profiles** from GitHub activity and recommends issues across several repositories, including **learning opportunities**.
 
-Every model is evaluated on repositories it never saw during training, against baselines - see [docs/EVALUATION.md](docs/EVALUATION.md) or the in-app *Model Card* page.
+Every model is evaluated on repositories it never saw during training, against baselines - see [docs/EVALUATION.md](docs/EVALUATION.md) or the in-app *Model Card* page. [docs/EVALUATION_v2.2.md](docs/EVALUATION_v2.2.md) covers the v2.2 changes (code-reading localization, structural difficulty, no-history evaluation).
 
 ## Architecture
 
@@ -48,10 +48,13 @@ docker compose --profile auth up         # also start the sign-in server
 ## Training and evaluation
 
 ```bash
+python -m contrimap_ml.prepare_data      # base-commit file trees for training/evaluation (git, no token; ~15 min)
 python -m contrimap_ml.train_v2 --stages difficulty,localization,success,actionability,recommendation
 python -m contrimap_ml.report            # regenerates docs/EVALUATION.md from the measured report
 python -m pytest contrimap_ml -q         # unit + API tests (no network needed)
 ```
+
+The localization stage also trains the stage-2 code re-ranker (reads the top-50 files of each shortlist; `--no-rerank` skips it) and writes per-issue localization signals that the difficulty stage stacks on the text model. Both are kept only if they beat the simpler model on dev / grouped CV.
 
 Multi-repository ingestion of fresh data (requires `GITHUB_TOKEN`):
 
@@ -66,6 +69,7 @@ Ingested repositories automatically provide history features (similar past issue
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/trending?language=` | trending repositories with good-first-issues |
+| POST · GET | `/api/repos/{o}/{r}/prepare` · `/status` | start the snapshot + graph build in the background; poll its stage and progress |
 | GET | `/api/repos/{o}/{r}` | overview: languages, skills, core files, structure |
 | GET / POST | `/api/repos/{o}/{r}/issues` · `/issues/ranked` | ranked issues (POST with `profile`, `mode`) |
 | GET / POST | `/api/repos/{o}/{r}/issues/{n}/analysis` | full issue analysis (POST adds personal fit) |
@@ -81,8 +85,8 @@ Legacy `/api/predict`, `/api/analyze` and `/api/repositories/issues` remain avai
 ## Known limitations
 
 - **Effort** estimates from issue text are weak (Spearman ≈ 0.12-0.16 with human time-to-fix; bucket accuracy barely above the majority baseline). Neither a 3x larger embedder (BGE-large) nor 5k more training PRs changed this. Estimates are shown as buckets with ranges, never as precise hours.
-- **Difficulty** generalises across repositories (macro-F1 0.41 vs 0.32 random; 0.37 vs 0.33 across 9 unseen languages after adding 17 multi-language training repositories) but per-issue confidence is often low; text-only difficulty appears close to its ceiling.
-- **Localization** is trained mostly on Python bug fixes; documentation-only and feature-scale issues are under-represented. It transfers well to fresh repositories (acc@5 0.76 on 274 issues from 6 repositories ingested in 2023+, changelog files excluded), but repositories without ingested history run in text-only mode and score lower.
+- **Difficulty** generalises across repositories (macro-F1 0.41 vs 0.32 random; 0.37 vs 0.33 across 9 unseen languages after adding 17 multi-language training repositories) but per-issue confidence is often low; text-only difficulty appears close to its ceiling. Adding where-the-fix-lands signals from localization and code reading improved rank correlation with fix size and human time-to-fix, but not class accuracy on dev, so it is not used.
+- **Localization** reads the code of its top 50 candidates (v2.2): on SWE-bench Verified acc@5 rose from 0.75 to 0.87, and on 9 other languages from 0.64 to 0.77. Without repository history (most live repositories) it reaches acc@5 0.83 on Verified (0.62 before code reading). A file that defines a symbol named in the issue is still missed when stage 1 does not shortlist it (for example a generic name like `core.py`). It is trained mostly on Python bug fixes; none of the evaluation sets contains a documentation-only fix, so docs requests are unmeasured.
 - **Success prediction** is trained on 9 repositories and evaluated leave-one-repository-out (mean AUC 0.80 vs 0.75 for the author's merge rate).
 - **Actionability** is trained on 26 repositories and evaluated leave-one-repository-out (mean AUC 0.70 vs 0.58 for a keyword heuristic).
 - **Contributor recommendation** is evaluated on next.js only; cross-repository generalisation is not measured.
