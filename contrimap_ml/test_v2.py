@@ -300,7 +300,7 @@ def test_api_routes_with_mocked_service(monkeypatch):
     from contrimap_ml import api, service
 
     monkeypatch.setattr(service, "trending", lambda language, limit: {"source": "github", "repositories": [{"full_name": "a/b"}]})
-    monkeypatch.setattr(service, "ranked_issues", lambda owner, repo, profile, mode="balanced", limit=30: {"repository": f"{owner}/{repo}", "personalized": bool(profile), "issues": [{"score": 0.5, "issue": {"number": 1}}]})
+    monkeypatch.setattr(service, "ranked_issues", lambda owner, repo, profile, mode="balanced", limit=30, user=None: {"repository": f"{owner}/{repo}", "personalized": bool(profile), "issues": [{"score": 0.5, "issue": {"number": 1}}]})
 
     def missing(owner, repo):
         raise service.GitHubError("Not found on GitHub.", 404)

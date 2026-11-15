@@ -172,6 +172,7 @@ def effort_from_distribution(distribution: np.ndarray, classes: list[int]) -> di
         "effort_hours": float(median),
         "effort_range_hours": [float(low), float(max(high, low))],
         "effort_bucket": EFFORT_LEVELS[int(classes[best])],
+        "effort_probability": float(distribution[best]),
         "effort_distribution": {EFFORT_LEVELS[int(level)]: float(p) for level, p in zip(classes, distribution)},
         "effort_note": "Estimated hands-on time for an engineer familiar with the codebase, calibrated on SWE-bench Verified human annotations.",
     }

@@ -19,6 +19,9 @@
 | | `recommendation.py` | Contributor profiles and contributor–issue scoring. |
 | | `guidance.py` | User profiles, learning-opportunity scoring, personalised weights, contribution paths. |
 | | `llm.py` | Grounded Claude explanations with validated file references and a template fallback. |
+| Intelligence | `history.py` | Similar-issue and resolving-PR retrieval: links merged PRs to issues through closing keywords, hybrid MiniLM + TF-IDF retrieval, similarity-weighted votes for the files past fixes changed; `evaluate_retrieval` measures it on the corpus. |
+| | `insights.py` | Visualizer helpers: functions/classes per file (8 language families), name-level symbol usage by importing files, file details, layered module (directory) views with outside neighbours. |
+| | `feedback.py` | Recommendation feedback (opened / saved / dismissed / completed) as JSON lines per user; a preference vector from engaged issues feeds a `feedback` ranking component. |
 | Serving | `service.py` | Single-flight TTL cache, background repository preparation with progress, GitHub access with ETag conditional requests (falls back to anonymous on a bad token, serves stale data when rate-limited), model orchestration. |
 | | `api.py` | FastAPI routes (also serves the built frontend in Docker). |
 | Training | `train_v2.py`, `recommendation_eval.py`, `report.py`, `compare_localization.py` | End-to-end training, evaluation and report rendering; side-by-side comparison of saved localization models on cached splits (with and without history). |
@@ -35,6 +38,14 @@
 6. Optional profile → stack match, interest similarity, difficulty fit, learning opportunity, success probability.
 7. Contribution path (commands detected from manifests, dependency-aware reading order) and grounded explanation.
 8. Views: issue neighbourhood graph, highlighted file tree, architecture highlights.
+9. On demand (`/similar`, loaded when the *File localization*, *Similar history* or visualizer *Issue impact* views open): the 100 most recently closed issues and merged PRs are indexed, the most similar are returned with the files their PRs changed, and those files are marked on the localization list and the impact graph ("history" badge, or their own column when the localizer did not predict them).
+
+## Visualizer
+
+- **Repository architecture**: directory map (`/architecture`) → double-click or "Open this directory" → layered file view of that directory (`/module`), with breadcrumbs, a tests toggle, module colour filters and search. Dashed boxes at the edges are other directories importing or imported by it; clicking one opens it.
+- **Issue impact**: predicted files with importers, dependencies, tests, and files changed by similar past fixes.
+- **File inspector** (any file click, or `?file=` in the URL): code preview, imports / imported by / tests, defined functions and classes with links to their lines, which importing files use which names, recent commits and related closed issues.
+- Large repositories stay readable because each view is capped (30 directories, 40 files per module, 6 neighbours per predicted file) and tall layers wrap into sub-columns.
 
 ## Design choices
 
@@ -47,6 +58,8 @@
 ## Operations
 
 - `CONTRIMAP_READ_CODE=0` disables stage 2 at inference (no blob downloads).
+- `CONTRIMAP_FEEDBACK_DIR` (default `data/feedback`) - where feedback events are stored. Users are identified by GitHub login when set in the profile, otherwise by a random id kept in the browser; nothing else is stored.
+- GitHub request budget for the new views: `/activity` 3-4 requests (cached 30 min), `/similar` 2 + up to 3 (anonymous) or 5 PR-file requests (cached 30 min / 1 day), file inspector 1 commits request (cached 1 h). All go through the ETag cache, so repeats inside the cache window cost nothing.
 - `CONTRIMAP_PROFILE_PR_FILES` (default 8) - how many merged PRs per contributor profile have their changed files fetched (skipped when the anonymous GitHub quota is low).
 - `/api/health` reports the remaining GitHub quota, whether models loaded and whether code reading is on; the Docker image has a `HEALTHCHECK` on it.
 - CI (`.github/workflows/ci.yml`): Python tests, frontend build, and a Docker build that starts the container and checks `/api/health` and the served frontend.

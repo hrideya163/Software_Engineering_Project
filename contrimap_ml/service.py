@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from collections import Counter
@@ -110,7 +111,7 @@ class GitHub:
         self._etag_lock = threading.Lock()
         self.quota: dict[str, Any] | None = None
 
-    def get(self, path: str, **params: Any) -> Any:
+    def get(self, path: str, /, **params: Any) -> Any:
         """GET with conditional requests: a ``304 Not Modified`` answer does not count against the rate limit."""
         key = path + "?" + "&".join(f"{k}={params[k]}" for k in sorted(params))
         with self._etag_lock:
@@ -545,24 +546,49 @@ def _interest_embedding(interests: tuple[str, ...]) -> np.ndarray | None:
     return vector / max(float(np.linalg.norm(vector)), 1e-9)
 
 
-def ranked_issues(owner: str, repo: str, profile_data: Mapping[str, Any] | None = None, mode: str = "balanced", limit: int = 30) -> dict[str, Any]:
-    """Ranked open issues; cached for 5 minutes (as long as the issue list) per profile, mode and limit."""
-    key = _result_key("ranked", owner, repo, profile_data, mode, limit)
-    return CACHE.get_or_set(key, 300, lambda: _ranked_issues(owner, repo, profile_data, mode, limit))
+def ranked_issues(owner: str, repo: str, profile_data: Mapping[str, Any] | None = None, mode: str = "balanced", limit: int = 30, user: str | None = None) -> dict[str, Any]:
+    """Ranked open issues; cached for 5 minutes (as long as the issue list) per profile, mode, limit and feedback state."""
+    from . import feedback
+
+    version = len(feedback.events(user)) if user else 0
+    key = _result_key("ranked", owner, repo, profile_data, mode, limit, user, version)
+    return CACHE.get_or_set(key, 300, lambda: _ranked_issues(owner, repo, profile_data, mode, limit, user))
 
 
-def _ranked_issues(owner: str, repo: str, profile_data: Mapping[str, Any] | None = None, mode: str = "balanced", limit: int = 30) -> dict[str, Any]:
+FEEDBACK_WEIGHT = 0.12
+
+
+def _issue_batch(owner: str, repo: str, limit: int) -> dict[str, Any]:
+    """The expensive, profile-independent part of ranking (embeddings, localization, difficulty), cached per repository."""
+    def load() -> dict[str, Any]:
+        full = f"{owner}/{repo}"
+        issues = list_issues(owner, repo, limit=limit)
+        if not issues:
+            return {"issues": []}
+        context = repository_context(owner, repo)
+        texts = [f"{i['title']}\n{i.get('body') or ''}".strip() for i in issues]
+        embeddings = embed(texts, cache=False)
+        localized = _localize_many(full, context, issues, embeddings, top_k=5)
+        return {
+            "issues": issues,
+            "embeddings": embeddings,
+            "localized": localized,
+            "estimates": _difficulty_batch(issues, embeddings, [signals for _, signals in localized]),
+            "actionability": models().actionability.predict(issues) if models().actionability is not None else None,
+            "repo_skills": {skill["id"]: {"weight": skill["weight"], "evidence": skill["evidence"]} for skill in context["snapshot"]["skills"]},
+        }
+
+    return CACHE.get_or_set(f"issue-batch:{owner}/{repo}:{limit}".lower(), 300, load)
+
+
+def _ranked_issues(owner: str, repo: str, profile_data: Mapping[str, Any] | None = None, mode: str = "balanced", limit: int = 30, user: str | None = None) -> dict[str, Any]:
     full = f"{owner}/{repo}"
-    issues = list_issues(owner, repo, limit=limit)
+    batch = _issue_batch(owner, repo, limit)
+    issues = batch["issues"]
     if not issues:
         return {"repository": full, "issues": [], "personalized": bool(profile_data)}
-    context = repository_context(owner, repo)
-    texts = [f"{i['title']}\n{i.get('body') or ''}".strip() for i in issues]
-    embeddings = embed(texts, cache=False)
-    localized = _localize_many(full, context, issues, embeddings, top_k=5)
-    estimates = _difficulty_batch(issues, embeddings, [signals for _, signals in localized])
-    actionability = models().actionability.predict(issues) if models().actionability is not None else None
-    repo_skills = {skill["id"]: {"weight": skill["weight"], "evidence": skill["evidence"]} for skill in context["snapshot"]["skills"]}
+    embeddings, localized, actionability, repo_skills = batch["embeddings"], batch["localized"], batch["actionability"], batch["repo_skills"]
+    estimates = [dict(estimate) for estimate in batch["estimates"]]  # copies: ranking adds fields per call
     profile = UserProfile.from_dict(profile_data) if profile_data else None
     interest = _interest_embedding(tuple(profile.interests)) if profile else None
     analyses, extras, personal_details = [], [], []
@@ -573,8 +599,21 @@ def _ranked_issues(owner: str, repo: str, profile_data: Mapping[str, Any] | None
             details = personal_components(profile, issue_skills, estimate["difficulty_distribution"], query, interest, _success(profile, issue, (profile_data or {}).get("history")))
             extras.append(details["components"])
             personal_details.append(details)
-    weights = personal_weights(profile, mode) if profile else DEFAULT_WEIGHTS
-    ranked = rank_issues(issues, analyses, actionability, weights, extras if profile else None)
+    weights = dict(personal_weights(profile, mode) if profile else DEFAULT_WEIGHTS)
+    flags: dict[str, dict[str, Any]] = {}
+    if user:
+        from . import feedback
+
+        flags = feedback.state(user, full)
+        preference = feedback.preference_vector(feedback.events(user), lambda texts: embed(texts, cache=False))
+        if preference is not None:
+            # Cosine similarity to issues the user saved, completed or opened (minus dismissed), mapped to [0, 1].
+            similarity = np.clip((embeddings @ preference + 1.0) / 2.0, 0.0, 1.0)
+            extras = extras if profile else [{} for _ in issues]
+            for position, value in enumerate(similarity):
+                extras[position]["feedback"] = float(value)
+            weights["feedback"] = FEEDBACK_WEIGHT
+    ranked = rank_issues(issues, analyses, actionability, weights, extras if (profile or "feedback" in weights) else None)
     index_of = {issue["number"]: position for position, issue in enumerate(issues)}
     output = []
     for item in ranked:
@@ -592,14 +631,24 @@ def _ranked_issues(owner: str, repo: str, profile_data: Mapping[str, Any] | None
             "effort_hours": analysis.get("effort_hours"),
             "top_files": [f["path"] for f in analysis["files"][:3]],
             "skills": analysis["skills"],
+            "confidence": analysis.get("confidence"),
+            "localization_confidence": round(float(analysis["files"][0].get("relative_confidence") or 0.0), 3) if analysis["files"] else None,
         }
+        state = flags.get(f"{full.lower()}#{item['issue']['number']}")
+        if state:
+            entry["feedback"] = {k: state[k] for k in ("opened", "saved", "dismissed", "completed")}
         if profile is not None:
             details = personal_details[position]
             entry["learning"] = details["learning"]
             entry["matched_skills"] = details["matched_skills"]
             entry["skill_gaps"] = details["skill_gaps"]
         output.append(entry)
-    return {"repository": full, "personalized": profile is not None, "mode": mode, "weights": weights, "issues": output}
+    hidden = [entry for entry in output if (entry.get("feedback") or {}).get("dismissed")]
+    output = [entry for entry in output if not (entry.get("feedback") or {}).get("dismissed")]
+    for rank, entry in enumerate(output, 1):
+        entry["rank"] = rank
+    return {"repository": full, "personalized": profile is not None, "mode": mode, "weights": weights, "issues": output,
+            "hidden": [{"number": e["issue"]["number"], "title": e["issue"]["title"]} for e in hidden], "uses_feedback": "feedback" in weights}
 
 
 def learning_opportunities(owner: str, repo: str, profile_data: Mapping[str, Any], limit: int = 10) -> dict[str, Any]:
@@ -732,3 +781,253 @@ def health() -> dict[str, Any]:
         status["models_loaded"] = False
         status["error"] = str(error)
     return status
+
+
+# ---------------------------------------------------------------------------
+# Repository history: similar issues, resolving pull requests, changed files
+# ---------------------------------------------------------------------------
+def _map_pull(pull: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "number": int(pull["number"]), "title": pull.get("title") or "", "body": (pull.get("body") or "")[:4000],
+        "merged_at": pull.get("merged_at"), "created_at": pull.get("created_at"), "closed_at": pull.get("closed_at"),
+        "html_url": pull.get("html_url"), "author": (pull.get("user") or {}).get("login"),
+        "labels": [label.get("name") for label in pull.get("labels") or [] if isinstance(label, Mapping)],
+    }
+
+
+def _closed_items(owner: str, repo: str) -> dict[str, Any]:
+    """The 100 most recently updated closed issues and pull requests (two requests, cached 30 minutes)."""
+    def load() -> dict[str, Any]:
+        raw_issues = github().get(f"/repos/{owner}/{repo}/issues", state="closed", per_page=100, sort="updated", direction="desc")
+        raw_pulls = github().get(f"/repos/{owner}/{repo}/pulls", state="closed", per_page=100, sort="updated", direction="desc")
+        issues = [{**_map_issue(item), "closed_at": item.get("closed_at"), "state_reason": item.get("state_reason")} for item in raw_issues if "pull_request" not in item]
+        pulls = [_map_pull(item) for item in raw_pulls]
+        return {"issues": issues, "pulls": pulls, "fetched_at": time.time()}
+
+    return CACHE.get_or_set(f"closed:{owner}/{repo}".lower(), 1800, load)
+
+
+def _history_index(owner: str, repo: str) -> dict[str, Any]:
+    from .history import HybridRetriever, history_text, link_history
+
+    def load() -> dict[str, Any]:
+        closed = _closed_items(owner, repo)
+        # Issues closed as "not planned" carry no implementation to learn from.
+        issues = [issue for issue in closed["issues"] if issue.get("state_reason") != "not_planned"]
+        records = link_history(issues, [pull for pull in closed["pulls"] if pull.get("merged_at")])
+        texts = [history_text(record["title"], record["body"]) for record in records]
+        embeddings = embed(texts, cache=False) if texts else np.zeros((0, 384), dtype="float32")
+        return {"records": records, "texts": texts, "retriever": HybridRetriever(texts, embeddings)}
+
+    return CACHE.get_or_set(f"history-index:{owner}/{repo}".lower(), 1800, load)
+
+
+def _pull_files(owner: str, repo: str, number: int) -> list[dict[str, Any]]:
+    def load() -> list[dict[str, Any]]:
+        files = github().get(f"/repos/{owner}/{repo}/pulls/{int(number)}/files", per_page=100)
+        return [{"path": f["filename"], "status": f.get("status"), "additions": f.get("additions", 0), "deletions": f.get("deletions", 0)} for f in files if isinstance(f, Mapping) and f.get("filename")]
+
+    return CACHE.get_or_set(f"pull-files:{owner}/{repo}#{number}".lower(), 86400, load)
+
+
+def similar_history(owner: str, repo: str, issue: Mapping[str, Any], k: int = 5, predicted: Sequence[str] = ()) -> dict[str, Any]:
+    """Past issues and merged PRs most similar to ``issue``, with the files their fixes changed."""
+    from .history import changed_file_votes, history_text
+
+    index = _history_index(owner, repo)
+    text = history_text(issue["title"], issue.get("body") or "")
+    query = embed([text], cache=False)[0]
+    exclude = [position for position, record in enumerate(index["records"]) if record["kind"] == "issue" and record["number"] == issue.get("number")]
+    similar = []
+    budget = 5 if github().authenticated else 3  # PR file lookups cost one request each
+    for position, score in index["retriever"].top(text, query, k=k, exclude=exclude):
+        record = index["records"][position]
+        item = {key: record[key] for key in ("kind", "number", "title", "closed_at", "html_url", "labels", "pull_requests")}
+        item["similarity"] = round(score, 3)
+        item["changed_files"] = []
+        if record["pull_requests"] and budget > 0:
+            budget -= 1
+            try:
+                files = _pull_files(owner, repo, record["pull_requests"][0]["number"])
+                item["changed_files"] = [f["path"] for f in files]
+                item["change_size"] = {"files": len(files), "additions": sum(f["additions"] for f in files), "deletions": sum(f["deletions"] for f in files)}
+            except GitHubError as error:
+                logger.info("PR files unavailable for %s/%s#%s: %s", owner, repo, record["pull_requests"][0]["number"], error)
+        similar.append(item)
+    votes = changed_file_votes(similar)
+    predicted_set = set(predicted)
+    for vote in votes:
+        vote["also_predicted"] = vote["path"] in predicted_set
+    return {
+        "repository": f"{owner}/{repo}",
+        "searched": len(index["records"]),
+        "similar": similar,
+        "historical_files": votes,
+        "agreement": sum(1 for vote in votes[:10] if vote["also_predicted"]),
+        "method": "hybrid MiniLM + TF-IDF over the 100 most recently closed issues and merged pull requests",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Visualizer: module drill-down and file inspector
+# ---------------------------------------------------------------------------
+def module_graph(owner: str, repo: str, directory: str, include_tests: bool = False, highlight: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
+    from .insights import module_view
+
+    context = repository_context(owner, repo)
+    return module_view(context["graph"], context["metrics"], directory, highlight, include_tests=include_tests)
+
+
+_PR_IN_MESSAGE = re.compile(r"\(#(\d+)\)\s*$|Merge pull request #(\d+)")
+
+
+def _file_commits(owner: str, repo: str, path: str) -> list[dict[str, Any]]:
+    def load() -> list[dict[str, Any]]:
+        commits = github().get(f"/repos/{owner}/{repo}/commits", path=path, per_page=10)
+        out = []
+        for item in commits:
+            message = ((item.get("commit") or {}).get("message") or "").split("\n")[0]
+            pull = _PR_IN_MESSAGE.search(message)
+            out.append({
+                "sha": item.get("sha", "")[:10], "message": message[:200], "html_url": item.get("html_url"),
+                "date": ((item.get("commit") or {}).get("author") or {}).get("date"),
+                "author": (item.get("author") or {}).get("login") or ((item.get("commit") or {}).get("author") or {}).get("name"),
+                "pull_request": int(pull.group(1) or pull.group(2)) if pull else None,
+            })
+        return out
+
+    return CACHE.get_or_set(f"file-commits:{owner}/{repo}:{path}".lower(), 3600, load)
+
+
+def file_inspector(owner: str, repo: str, path: str, preview_lines: int = 120) -> dict[str, Any]:
+    from .insights import extract_symbols, file_details, symbol_dependents, symbol_usage
+    from .repo_trees import fetch_blobs
+
+    full = f"{owner}/{repo}"
+    context = repository_context(owner, repo)
+    graph, metrics, snapshot = context["graph"], context["metrics"], context["snapshot"]
+    try:
+        details = file_details(graph, metrics, path)
+    except KeyError:
+        raise GitHubError(f"{path} is not a source file of {full}.", 404) from None
+    wanted = [path] + details["dependents"][:12]
+    try:
+        contents = fetch_blobs(full, snapshot["sha"], wanted)
+    except Exception as error:  # the inspector still shows graph data without code
+        logger.warning("Could not read %s from %s: %s", path, full, error)
+        contents = {}
+    content = contents.get(path, "")
+    symbols = extract_symbols(path, content)
+    usage = symbol_usage(symbols, {p: contents.get(p, "") for p in details["dependents"][:12]})
+    lines = content.splitlines()
+    try:
+        commits = _file_commits(owner, repo, path)
+    except GitHubError as error:
+        commits, details["history_error"] = [], str(error)
+    related_issues = []
+    index = CACHE.peek(f"history-index:{owner}/{repo}".lower())
+    if index:
+        pulls = {c["pull_request"] for c in commits if c.get("pull_request")}
+        related_issues = [{"number": r["number"], "title": r["title"], "html_url": r["html_url"], "kind": r["kind"]} for r in index["records"] if any(p["number"] in pulls for p in r["pull_requests"])][:6]
+    return {
+        **details,
+        "repository": full,
+        "sha": snapshot["sha"],
+        "html_url": f"https://github.com/{full}/blob/{snapshot['sha']}/{path}",
+        "lines": len(lines),
+        "preview": "\n".join(lines[:preview_lines]),
+        "preview_truncated": len(lines) > preview_lines,
+        "symbols": symbols,
+        "symbol_usage": usage,
+        "symbol_dependents": symbol_dependents(usage)[:15],
+        "commits": commits,
+        "related_issues": related_issues,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Repository health and activity
+# ---------------------------------------------------------------------------
+_NEWCOMER_LABEL = re.compile(r"good.first|beginner|easy|help.wanted", re.I)
+
+
+def _median(values: Sequence[float]) -> float | None:
+    return float(np.median(values)) if values else None
+
+
+def _parse_time(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
+
+
+def repository_activity(owner: str, repo: str, days: int = 90) -> dict[str, Any]:
+    """Commit activity, contributor concentration, PR merge speed and issue responsiveness (cached 30 minutes)."""
+    def load() -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        since = now - timedelta(days=days)
+        commits = github().get(f"/repos/{owner}/{repo}/commits", since=since.isoformat(), per_page=100)
+        contributors = github().get(f"/repos/{owner}/{repo}/contributors", per_page=30)
+        closed = _closed_items(owner, repo)
+        open_issues = list_issues(owner, repo, limit=40)
+
+        weeks = [0] * (days // 7 + 1)
+        authors: Counter = Counter()
+        for item in commits:
+            when = _parse_time(((item.get("commit") or {}).get("author") or {}).get("date"))
+            if when:
+                weeks[min(len(weeks) - 1, max(0, (now - when).days // 7))] += 1
+            login = (item.get("author") or {}).get("login") or ((item.get("commit") or {}).get("author") or {}).get("name") or "unknown"
+            if not login.endswith("[bot]"):  # automation is not a maintainer
+                authors[login] += 1
+        ranked_authors = authors.most_common()
+        covered, bus_factor = 0, 0
+        for _, count in ranked_authors:
+            covered += count
+            bus_factor += 1
+            if covered >= 0.5 * max(sum(authors.values()), 1):
+                break
+
+        merged = [p for p in closed["pulls"] if p.get("merged_at")]
+        merge_days = [(_parse_time(p["merged_at"]) - _parse_time(p["created_at"])).total_seconds() / 86400 for p in merged if p.get("created_at")]
+        recent_merged = [p for p in merged if _parse_time(p["merged_at"]) >= since]
+        close_days = [(_parse_time(i["closed_at"]) - _parse_time(i["created_at"])).total_seconds() / 86400 for i in closed["issues"] if i.get("closed_at") and i.get("created_at")]
+        open_age = [(now - _parse_time(i["created_at"])).total_seconds() / 86400 for i in open_issues if i.get("created_at")]
+        unanswered = sum(1 for i in open_issues if not i.get("comments"))
+        newcomer = sum(1 for i in open_issues if any(_NEWCOMER_LABEL.search(label or "") for label in i.get("labels") or []))
+
+        pushed = _parse_time(_repo_meta(owner, repo).get("pushed_at"))
+        median_merge = _median(merge_days)
+        components = {
+            "activity": min(1.0, len(commits) / 60.0),
+            "recency": 1.0 if pushed and (now - pushed).days <= 7 else (0.6 if pushed and (now - pushed).days <= 30 else 0.2),
+            "merge_speed": 1.0 / (1.0 + (median_merge if median_merge is not None else 30.0) / 7.0),
+            "acceptance": len(merged) / max(len(closed["pulls"]), 1),
+            "contributor_diversity": min(1.0, bus_factor / 4.0),
+            "responsiveness": 1.0 - unanswered / max(len(open_issues), 1),
+        }
+        weights = {"activity": 0.2, "recency": 0.1, "merge_speed": 0.2, "acceptance": 0.2, "contributor_diversity": 0.15, "responsiveness": 0.15}
+        score = sum(weights[k] * v for k, v in components.items())
+        return {
+            "repository": f"{owner}/{repo}",
+            "window_days": days,
+            "commits": {"total": len(commits), "capped": len(commits) >= 100, "weekly": list(reversed(weeks))},
+            "contributors": {
+                "active": len(authors),
+                "bus_factor": bus_factor,
+                "top": [{"login": login, "commits": count} for login, count in ranked_authors[:6]],
+                "all_time": [{"login": c.get("login"), "contributions": c.get("contributions"), "avatar_url": c.get("avatar_url")} for c in contributors if isinstance(c, Mapping) and not str(c.get("login") or "").endswith("[bot]")][:8],
+            },
+            "pull_requests": {
+                "sample": len(closed["pulls"]), "merged": len(merged), "merged_in_window": len(recent_merged), "closed_unmerged": len(closed["pulls"]) - len(merged),
+                "median_days_to_merge": round(median_merge, 1) if median_merge is not None else None,
+            },
+            "issues": {
+                "open_sampled": len(open_issues), "unanswered": unanswered, "newcomer_labelled": newcomer,
+                "median_open_age_days": round(_median(open_age), 1) if open_age else None,
+                "median_days_to_close": round(_median(close_days), 1) if close_days else None,
+            },
+            "health": {"score": round(score, 3), "components": {k: round(v, 3) for k, v in components.items()}, "weights": weights,
+                       "label": "healthy" if score >= 0.65 else ("moderate" if score >= 0.4 else "low activity")},
+            "note": "From the last 100 commits, the 100 most recently closed PRs and issues, and 40 open issues. A heuristic summary, not a trained model.",
+        }
+
+    return CACHE.get_or_set(f"activity:{owner}/{repo}:{days}".lower(), 1800, load)

@@ -71,10 +71,15 @@ Ingested repositories automatically provide history features (similar past issue
 | GET | `/api/trending?language=` | trending repositories with good-first-issues |
 | POST · GET | `/api/repos/{o}/{r}/prepare` · `/status` | start the snapshot + graph build in the background; poll its stage and progress |
 | GET | `/api/repos/{o}/{r}` | overview: languages, skills, core files, structure |
-| GET / POST | `/api/repos/{o}/{r}/issues` · `/issues/ranked` | ranked issues (POST with `profile`, `mode`) |
+| GET / POST | `/api/repos/{o}/{r}/issues` · `/issues/ranked` | ranked issues (POST with `profile`, `mode`; `user` applies that user's feedback) |
 | GET / POST | `/api/repos/{o}/{r}/issues/{n}/analysis` | full issue analysis (POST adds personal fit) |
 | POST | `/api/repos/{o}/{r}/analyze` | analyse draft issue text |
 | GET | `/api/repos/{o}/{r}/architecture` · `/tree` | visualizer payloads |
+| GET | `/api/repos/{o}/{r}/module?directory=&tests=&issue=` | one directory's files in import layers, with outside importers/dependencies |
+| GET | `/api/repos/{o}/{r}/file?path=` | file inspector: code preview, imports, dependents, tests, functions/classes and which files use them, recent commits |
+| GET | `/api/repos/{o}/{r}/issues/{n}/similar` | similar closed issues and merged PRs, the files their fixes changed, agreement with the localizer |
+| GET | `/api/repos/{o}/{r}/activity` | repository health: weekly commits, maintainer spread, PR merge speed and acceptance, issue responsiveness |
+| POST · GET | `/api/feedback` · `/api/feedback/{user}` | record opened / saved / dismissed / completed issues; summary per user |
 | POST | `/api/repos/{o}/{r}/learning` | learning-opportunity ranking |
 | GET | `/api/contributors/{login}` | contributor profile and extracted skills |
 | POST | `/api/recommendations` | personalised issues across repositories |

@@ -61,6 +61,16 @@ class ProfileRequest(BaseModel):
     profile: Profile | None = None
     mode: str = Field(default="balanced", pattern="^(balanced|learning|quick_win)$")
     limit: int = Field(default=30, ge=1, le=60)
+    user: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.-]{1,64}$")  # feedback id (GitHub login or a browser id)
+
+
+class FeedbackRequest(BaseModel):
+    user: str = Field(pattern=r"^[A-Za-z0-9_.-]{1,64}$")
+    repository: str = Field(pattern=r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
+    number: int = Field(ge=1)
+    action: str = Field(pattern="^(opened|saved|unsaved|dismissed|restored|completed)$")
+    title: str = Field(default="", max_length=1000)
+    text: str = Field(default="", max_length=20_000)
 
 
 class IssueInput(BaseModel):
@@ -82,6 +92,7 @@ class RecommendationRequest(BaseModel):
     mode: str = Field(default="balanced", pattern="^(balanced|learning|quick_win)$")
     per_repository: int = Field(default=15, ge=1, le=40)
     limit: int = Field(default=20, ge=1, le=60)
+    user: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.-]{1,64}$")
 
 
 class TextRequest(BaseModel):
@@ -129,13 +140,15 @@ def repository(owner: str, repo: str) -> dict[str, Any]:
 
 
 @app.get("/api/repos/{owner}/{repo}/issues")
-def issues(owner: str, repo: str, limit: int = 30) -> dict[str, Any]:
-    return service.ranked_issues(*_repo(owner, repo), None, limit=max(1, min(limit, 60)))
+def issues(owner: str, repo: str, limit: int = 30, user: str | None = None) -> dict[str, Any]:
+    if user is not None and not NAME.match(user):
+        raise HTTPException(422, "Invalid user id.")
+    return service.ranked_issues(*_repo(owner, repo), None, limit=max(1, min(limit, 60)), user=user)
 
 
 @app.post("/api/repos/{owner}/{repo}/issues/ranked")
 def personalised_issues(owner: str, repo: str, request: ProfileRequest) -> dict[str, Any]:
-    return service.ranked_issues(*_repo(owner, repo), _profile(request.profile), request.mode, request.limit)
+    return service.ranked_issues(*_repo(owner, repo), _profile(request.profile), request.mode, request.limit, user=request.user)
 
 
 @app.post("/api/repos/{owner}/{repo}/learning")
@@ -171,6 +184,57 @@ def architecture(owner: str, repo: str) -> dict[str, Any]:
     return service.architecture(*_repo(owner, repo))
 
 
+@app.get("/api/repos/{owner}/{repo}/activity")
+def activity(owner: str, repo: str) -> dict[str, Any]:
+    return service.repository_activity(*_repo(owner, repo))
+
+
+@app.get("/api/repos/{owner}/{repo}/issues/{number}/similar")
+def similar(owner: str, repo: str, number: int) -> dict[str, Any]:
+    owner, repo = _repo(owner, repo)
+    issue = service.get_issue(owner, repo, number)
+    # Same cache entry as the analysis page, so this is free once the issue has been analysed.
+    predicted = [f["path"] for f in service.analyze_issue(owner, repo, issue)["files"][:10]]
+    return service.similar_history(owner, repo, issue, predicted=predicted)
+
+
+@app.get("/api/repos/{owner}/{repo}/module")
+def module(owner: str, repo: str, directory: str, tests: bool = False, issue: int | None = None) -> dict[str, Any]:
+    owner, repo = _repo(owner, repo)
+    if len(directory) > 500 or ".." in directory:
+        raise HTTPException(422, "Invalid directory.")
+    highlight = []
+    if issue is not None:
+        highlight = service.analyze_issue(owner, repo, service.get_issue(owner, repo, issue), with_explanation=False)["architecture_highlight"]
+    return service.module_graph(owner, repo, directory, include_tests=tests, highlight=highlight)
+
+
+@app.get("/api/repos/{owner}/{repo}/file")
+def file(owner: str, repo: str, path: str) -> dict[str, Any]:
+    if len(path) > 500 or ".." in path:
+        raise HTTPException(422, "Invalid path.")
+    return service.file_inspector(*_repo(owner, repo), path)
+
+
+@app.post("/api/feedback")
+def record_feedback(request: FeedbackRequest) -> dict[str, Any]:
+    from . import feedback
+
+    owner, _, repo = request.repository.partition("/")
+    _repo(owner, repo)
+    event = feedback.record(request.user, request.repository, request.number, request.action, request.title, request.text)
+    return {"recorded": event, "state": feedback.state(request.user, request.repository).get(f"{request.repository.lower()}#{request.number}")}
+
+
+@app.get("/api/feedback/{user}")
+def feedback_summary(user: str) -> dict[str, Any]:
+    from . import feedback
+
+    if not NAME.match(user):
+        raise HTTPException(422, "Invalid user id.")
+    return feedback.summary(user)
+
+
 @app.get("/api/repos/{owner}/{repo}/tree")
 def tree(owner: str, repo: str) -> dict[str, Any]:
     from .codegraph import file_tree
@@ -197,7 +261,7 @@ def recommendations(request: RecommendationRequest) -> dict[str, Any]:
 
     def rank_repository(full_name: str) -> dict[str, Any]:
         owner, _, repo = full_name.partition("/")
-        return service.ranked_issues(*_repo(owner, repo), profile, request.mode, request.per_repository)
+        return service.ranked_issues(*_repo(owner, repo), profile, request.mode, request.per_repository, user=request.user)
 
     # Repositories are independent (git snapshots, issue lists), so they are ranked concurrently.
     with ThreadPoolExecutor(max_workers=3) as pool:

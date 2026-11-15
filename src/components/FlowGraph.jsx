@@ -5,8 +5,8 @@ import { useEffect, useMemo, useState } from 'react'
 
 // Shared palette (same hues as the repository dashboard charts).
 export const MODULE_COLORS = ['#2d7ef7', '#0eaa7d', '#f59e0b', '#7c3aed', '#06b6d4', '#ec4899', '#64748b', '#ef4444']
-export const ROLE_COLORS = { target: '#e11d48', importer: '#2d7ef7', dependency: '#0eaa7d', test: '#7c3aed', directory: '#10233e' }
-const ROLE_LABELS = { target: 'Likely change', importer: 'Imports it', dependency: 'Imported by it', test: 'Test' }
+export const ROLE_COLORS = { target: '#e11d48', historical: '#d97706', importer: '#2d7ef7', dependency: '#0eaa7d', test: '#7c3aed', directory: '#10233e', external: '#94a3b8', module_file: '#64748b' }
+const ROLE_LABELS = { target: 'Likely change', historical: 'Changed by a similar fix', importer: 'Imports it', dependency: 'Imported by it', test: 'Test', module_file: 'Source file', external: 'Outside this module' }
 
 export const moduleColor = community => (community === null || community === undefined ? '#94a3b8' : MODULE_COLORS[Number(community) % MODULE_COLORS.length])
 
@@ -32,9 +32,9 @@ function DirectoryNode({ data }) {
 }
 
 function FileNode({ data }) {
-  const color = ROLE_COLORS[data.role] || '#64748b'
-  const ring = data.selected ? 'ring-2 ring-ink' : data.role === 'target' ? 'ring-2 ring-rose-200' : ''
-  return <div className={`relative w-[230px] rounded-xl border border-slate-200 bg-white shadow-sm transition-all duration-200 hover:shadow-md ${ring}`} style={{ opacity: data.dimmed ? 0.28 : 1 }}>
+  const color = data.role === 'module_file' ? data.color : (ROLE_COLORS[data.role] || '#64748b')
+  const ring = data.selected ? 'ring-2 ring-ink' : data.match ? 'ring-2 ring-mint' : data.role === 'target' ? 'ring-2 ring-rose-200' : ''
+  return <div className={`relative w-[230px] rounded-xl border bg-white shadow-sm transition-all duration-200 hover:shadow-md ${data.role === 'external' ? 'border-dashed border-slate-300 bg-slate-50' : 'border-slate-200'} ${ring}`} style={{ opacity: data.dimmed ? 0.28 : 1 }}>
     <Handle type="target" position={Position.Left} style={hidden} />
     <div className="flex items-stretch">
       <span className="w-1.5 shrink-0 rounded-l-xl" style={{ background: color }} />
@@ -43,10 +43,13 @@ function FileNode({ data }) {
           {data.rank && <span className="rounded bg-rose-100 px-1 text-[10px] font-bold text-rose-700">#{data.rank}</span>}
           <p className="mono truncate text-[12px] font-medium text-ink" title={data.path}>{data.label}</p>
         </div>
-        <p className="mono mt-0.5 truncate text-[10px] text-slate-400" title={data.path}>{data.path}</p>
-        <p className="mt-1 text-[10px] font-bold uppercase tracking-wide" style={{ color }}>{ROLE_LABELS[data.role] || data.role}</p>
+        {data.role === 'module_file' ? <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-100" title="Importance within the import graph"><div className="h-full rounded-full" style={{ width: `${Math.max(4, (data.importance_share || 0) * 100)}%`, background: color }} /></div>
+          : data.role === 'external' ? <p className="mt-0.5 text-[10px] text-slate-500">{data.direction === 'in' ? 'imports this module' : 'imported by this module'} · {data.imports} links</p>
+          : <p className="mono mt-0.5 truncate text-[10px] text-slate-400" title={data.path}>{data.path}</p>}
+        {data.role !== 'module_file' && data.role !== 'external' && <p className="mt-1 text-[10px] font-bold uppercase tracking-wide" style={{ color }}>{ROLE_LABELS[data.role] || data.role}</p>}
       </div>
     </div>
+    {data.historical && data.role !== 'historical' && <span className="absolute -top-2 right-2 rounded-full bg-amber-500 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-white" title="Also changed by the fix of a similar past issue">history</span>}
     <Handle type="source" position={Position.Right} style={hidden} />
   </div>
 }
@@ -77,7 +80,7 @@ function FocusController({ ids, positions, minZoom = 0.3, maxZoom = 1.1, padding
  * Renders backend graph payloads (codegraph.architecture_view / issue_view).
  * Hovering or selecting a node focuses it and its direct neighbours; everything else fades.
  */
-export default function FlowGraph({ graph, height = 520, onNodeClick, onPaneClick, selectedId = null, matchIds = null, focusIds = [], showMiniMap = true }) {
+export default function FlowGraph({ graph, height = 520, onNodeClick, onNodeDoubleClick, onPaneClick, selectedId = null, matchIds = null, focusIds = [], showMiniMap = true }) {
   const [hovered, setHovered] = useState(null)
   const [fullscreen, setFullscreen] = useState(false)
 
@@ -118,6 +121,7 @@ export default function FlowGraph({ graph, height = 520, onNodeClick, onPaneClic
         color: moduleColor(data.community),
         importanceShare: (data.importance || 0) / maxImportance,
         selected: node.id === selectedId,
+        importance_share: data.importance_share,
         match: matchIds ? matchIds.has(node.id) : false,
         dimmed: dimmedByFocus || dimmedBySearch,
       },
@@ -128,12 +132,13 @@ export default function FlowGraph({ graph, height = 520, onNodeClick, onPaneClic
     const active = focus && (edge.source === focus || edge.target === focus)
     const imports = edge.data?.imports || 0
     const isTest = edge.data?.type === 'tests'
-    const color = active ? '#10233e' : isTest ? '#a78bfa' : '#cbd5e1'
+    const isSoft = edge.data?.type === 'external' || edge.data?.type === 'history'
+    const color = active ? '#10233e' : isTest ? '#a78bfa' : edge.data?.type === 'history' ? '#fbbf24' : '#cbd5e1'
     return {
       id: edge.id, source: edge.source, target: edge.target,
       animated: Boolean(active),
       markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14, color },
-      style: { strokeWidth: imports ? Math.min(6, 1.2 + Math.log2(imports)) : 1.5, stroke: color, opacity: focus && !active ? 0.25 : 1, strokeDasharray: isTest ? '5 4' : undefined },
+      style: { strokeWidth: imports ? Math.min(6, 1.2 + Math.log2(imports)) : 1.5, stroke: color, opacity: focus && !active ? 0.25 : 1, strokeDasharray: isTest || isSoft ? '5 4' : undefined },
       label: active && imports > 1 ? `${imports} imports` : undefined,
       labelStyle: { fontSize: 10, fontWeight: 700, fill: '#10233e' },
       labelBgStyle: { fill: '#ffffff' },
@@ -160,7 +165,7 @@ export default function FlowGraph({ graph, height = 520, onNodeClick, onPaneClic
     <ReactFlow
       nodes={nodes} edges={edges} nodeTypes={nodeTypes} fitView={!initialIds.length} fitViewOptions={{ padding: 0.15 }} minZoom={0.1} maxZoom={2}
       nodesConnectable={false} nodesDraggable={false} elementsSelectable
-      onNodeClick={onNodeClick} onPaneClick={onPaneClick}
+      onNodeClick={onNodeClick} onNodeDoubleClick={onNodeDoubleClick} onPaneClick={onPaneClick} zoomOnDoubleClick={!onNodeDoubleClick}
       onNodeMouseEnter={(_, node) => setHovered(node.id)} onNodeMouseLeave={() => setHovered(null)}
       proOptions={{ hideAttribution: true }}
     >

@@ -21,10 +21,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements-ml.txt
-      # test_v2 / test_v3 need no network, models or artifacts. test_pipeline trains the legacy
+      # test_v2 / test_v3 / test_v4 need no network, models or artifacts. test_pipeline trains the legacy
       # models and downloads the sentence embedder, so it runs in its own step.
       - name: Unit and API tests
-        run: python -m pytest contrimap_ml/test_v2.py contrimap_ml/test_v3.py -q
+        run: python -m pytest contrimap_ml/test_v2.py contrimap_ml/test_v3.py contrimap_ml/test_v4.py -q
       - name: Legacy pipeline tests
         run: python -m pytest contrimap_ml/test_pipeline.py -q
 
