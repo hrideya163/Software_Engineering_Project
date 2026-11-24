@@ -14,8 +14,8 @@ Every model is evaluated on repositories it never saw during training, against b
 
 ```
 React + Vite (src/)  ──►  FastAPI  contrimap_ml/api.py  ──►  service.py ──► models (artifacts/v2)
-        │                                                   ├─ git trees/blobs (repo_trees.py, no token)
-        └──► Express server/ (GitHub / Google sign-in)      └─ GitHub REST (metadata, issues, trending)
+                               └─ auth.py (GitHub / Google    ├─ git trees/blobs (repo_trees.py, no token)
+                                  sign-in, signed cookies)    └─ GitHub REST (metadata, issues, trending)
 ```
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for modules and data flow, and [docs/DATA.md](docs/DATA.md) for datasets and leakage controls.
@@ -31,18 +31,16 @@ uvicorn contrimap_ml.api:app --port 8001
 # 2. Frontend
 npm install
 npm run dev                              # http://localhost:5173/ContriMap-website/
-
-# 3. Optional: sign-in server
-cd server && npm install && cp .env.example .env && npm run dev
 ```
 
 Copy `.env.example` to `.env`. A valid `GITHUB_TOKEN` raises the GitHub API limit from 60 to 5,000 requests/hour (repository code itself is read with git and needs no token). `ANTHROPIC_API_KEY` enables Claude-written explanations (`ANTHROPIC_MODEL`, default `claude-opus-5-5`); without it a deterministic template is used.
 
+Sign-in is optional and served by the same API (`contrimap_ml/auth.py`). Set `GITHUB_OAUTH_CLIENT_ID`/`GITHUB_OAUTH_CLIENT_SECRET` and/or `GOOGLE_OAUTH_CLIENT_ID`/`GOOGLE_OAUTH_CLIENT_SECRET`, with callback URLs `http://localhost:8001/api/auth/github/callback` and `.../google/callback`. Sessions are HMAC-signed cookies (14 days) that survive server restarts; signing out revokes the session. Without credentials the *Sign in* button is hidden and everything works signed-out.
+
 ### Docker
 
 ```bash
-docker compose up --build                # http://localhost:8001 (frontend + API)
-docker compose --profile auth up         # also start the sign-in server
+docker compose up --build                # http://localhost:8001 (frontend + API + sign-in)
 ```
 
 ## Training and evaluation

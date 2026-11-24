@@ -1,17 +1,11 @@
-import { request, usingMockData } from './api'
+import { API_BASE_URL, mlRequest } from './api'
 
-const BASE_URL = import.meta.env.VITE_API_URL
+// Sign-in is handled by the FastAPI backend (contrimap_ml/auth.py) with a signed, HTTP-only session cookie.
+export const getSession = () => mlRequest('/api/auth/me')
 
-export const getCurrentUser = () =>
-  usingMockData ? Promise.resolve({ user: null, configured: false, providers: { github: false, google: false } }) : request('/auth/me')
-
-export const loginWithGitHub = () => {
-  window.location.href = `${BASE_URL}/auth/github`
+// Full-page redirect to the provider; `next` is the in-app path to return to afterwards.
+export const signIn = (provider, next = '/') => {
+  window.location.href = `${API_BASE_URL}/api/auth/${provider}?next=${encodeURIComponent(next)}`
 }
 
-export const loginWithGoogle = () => {
-  window.location.href = `${BASE_URL}/auth/google`
-}
-
-export const logout = () =>
-  usingMockData ? Promise.resolve({ ok: true }) : request('/auth/logout', { method: 'POST' })
+export const signOut = () => mlRequest('/api/auth/logout', { method: 'POST' })

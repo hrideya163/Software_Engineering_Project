@@ -24,6 +24,7 @@
 | | `feedback.py` | Recommendation feedback (opened / saved / dismissed / completed) as JSON lines per user; a preference vector from engaged issues feeds a `feedback` ranking component. |
 | Serving | `service.py` | Single-flight TTL cache, background repository preparation with progress, GitHub access with ETag conditional requests (falls back to anonymous on a bad token, serves stale data when rate-limited), model orchestration. |
 | | `api.py` | FastAPI routes (also serves the built frontend in Docker). |
+| | `auth.py` | Optional GitHub / Google sign-in: OAuth with a signed state cookie, stateless HMAC-signed session cookies (survive restarts), revocation on sign-out, open-redirect-safe return paths. |
 | Training | `train_v2.py`, `recommendation_eval.py`, `report.py`, `compare_localization.py` | End-to-end training, evaluation and report rendering; side-by-side comparison of saved localization models on cached splits (with and without history). |
 | Legacy | `models.py`, `features.py`, `inference.py`, … | v1 pipeline kept for reproducibility of the original baseline. |
 
@@ -39,6 +40,12 @@
 7. Contribution path (commands detected from manifests, dependency-aware reading order) and grounded explanation.
 8. Views: issue neighbourhood graph, highlighted file tree, architecture highlights.
 9. On demand (`/similar`, loaded when the *File localization*, *Similar history* or visualizer *Issue impact* views open): the 100 most recently closed issues and merged PRs are indexed, the most similar are returned with the files their PRs changed, and those files are marked on the localization list and the impact graph ("history" badge, or their own column when the localizer did not predict them).
+
+## Frontend structure
+
+- `Page` (non-repository pages) and `AppLayout` (repository pages, with the Overview / Issues / Visualizer rail) share one sticky `Navbar` with the account menu and sign-in notices.
+- `AppContext` holds the session and the contributor profile, so every page sees the same state; `useAsync` gives every request a loading state and a retry.
+- `utils/graphLayout.js` lays out import graphs in layers (Tarjan components, longest-path layers, barycenter ordering, wrapped tall columns); `utils/graphViews.js` builds the architecture, directory and issue-impact views from API payloads.
 
 ## Visualizer
 

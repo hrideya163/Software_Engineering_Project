@@ -1,4 +1,4 @@
-import { Activity, BookOpen, ExternalLink, FileCode2, FlaskConical, GitFork, GitPullRequest, HeartPulse, Network, Star, Users } from 'lucide-react'
+import { Activity, BookOpen, ExternalLink, FileCode2, FlaskConical, GitFork, GitPullRequest, HeartPulse, Star, Users } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { getActivity, getRankedIssues, getRepositoryOverview } from '../api/contrimapApi'
@@ -89,7 +89,7 @@ function RepositoryDashboardContent() {
   const overview = useAsync(() => getRepositoryOverview(owner, repo), [owner, repo])
   const ranked = useAsync(() => getRankedIssues(owner, repo, { profile, limit: 20 }), [owner, repo])
   if (overview.loading) return <AppLayout><Loading label="Snapshotting the repository and building its code graph…" /></AppLayout>
-  if (overview.error) return <AppLayout><ErrorMessage message={overview.error} /></AppLayout>
+  if (overview.error) return <AppLayout><ErrorMessage message={overview.error} onRetry={overview.retry} /></AppLayout>
   const details = overview.data
   return <AppLayout>
     <p className="eyebrow">Repository</p>
@@ -105,7 +105,6 @@ function RepositoryDashboardContent() {
         </div>
       </div>
       <div className="flex gap-2">
-        <Link to={`/repository/${owner}/${repo}/visualizer`} className="btn-secondary"><Network size={16} />Visualizer</Link>
         <a target="_blank" rel="noreferrer" href={`https://github.com/${owner}/${repo}`} className="btn-secondary">GitHub <ExternalLink size={14} /></a>
       </div>
     </div>
@@ -148,7 +147,7 @@ function RepositoryDashboardContent() {
         <Link to={`/repository/${owner}/${repo}/issues`} className="btn-secondary">All ranked issues</Link>
       </div>
       {ranked.loading && <Loading label="Scoring open issues with the models…" />}
-      {ranked.error && <div className="mt-4"><ErrorMessage message={ranked.error} /></div>}
+      {ranked.error && <div className="mt-4"><ErrorMessage message={ranked.error} onRetry={ranked.retry} /></div>}
       {ranked.data && !ranked.data.issues.length && <div className="mt-4"><EmptyState message="No open issues found for this repository." /></div>}
       <div className="mt-4 grid gap-4 md:grid-cols-2 2xl:grid-cols-3">{ranked.data?.issues.slice(0, 6).map(item => <RankedIssueCard item={item} owner={owner} repo={repo} weights={ranked.data.weights} key={item.issue.number} />)}</div>
     </section>

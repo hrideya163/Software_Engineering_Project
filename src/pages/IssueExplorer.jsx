@@ -20,7 +20,7 @@ function IssueExplorerContent() {
   const [query, setQuery] = useState('')
   const [difficulty, setDifficulty] = useState('All')
   const [savedOnly, setSavedOnly] = useState(false)
-  const { data, loading, error } = useAsync(() => getRankedIssues(owner, repo, { profile: personal ? profile : null, mode, limit: 40 }), [owner, repo, personal, mode])
+  const { data, loading, error, retry } = useAsync(() => getRankedIssues(owner, repo, { profile: personal ? profile : null, mode, limit: 40 }), [owner, repo, personal, mode])
   const filtered = useMemo(() => (data?.issues || []).filter(item => (difficulty === 'All' || item.difficulty === difficulty) && (!savedOnly || item.feedback?.saved) && `${item.issue.title} ${item.summary} ${(item.issue.labels || []).join(' ')}`.toLowerCase().includes(query.toLowerCase())), [data, query, difficulty, savedOnly])
   return <AppLayout>
     <p className="eyebrow">Issue discovery</p>
@@ -35,7 +35,7 @@ function IssueExplorerContent() {
       {personal && <select value={mode} onChange={event => setMode(event.target.value)} className="rounded-xl border border-slate-200 px-3 py-3 text-sm font-bold">{MODES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>}
     </div>
     {loading && <Loading label="Scoring issues…" />}
-    {error && <div className="mt-4"><ErrorMessage message={error} /></div>}
+    {error && <div className="mt-4"><ErrorMessage message={error} onRetry={retry} /></div>}
     {!loading && data && <>
       <p className="mt-6 text-sm font-semibold text-slate-500">{filtered.length} of {data.issues.length} issues{data.hidden?.length ? ` · ${data.hidden.length} hidden as not for you` : ''}{data.uses_feedback ? ' · ranking adapts to issues you saved and opened' : ''}</p>
       <div className="mt-4 grid gap-4 md:grid-cols-2 2xl:grid-cols-3">{filtered.map(item => <RankedIssueCard item={item} owner={owner} repo={repo} weights={data.weights} key={item.issue.number} />)}</div>

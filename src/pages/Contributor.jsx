@@ -3,16 +3,16 @@ import { useParams } from 'react-router-dom'
 import { getContributor } from '../api/contrimapApi'
 import ErrorMessage from '../components/ErrorMessage'
 import Loading from '../components/Loading'
-import Navbar from '../components/Navbar'
+import Page from '../components/Page'
 import { useAsync } from '../hooks/useProfile'
 import { timeAgo } from '../utils/formatters'
 
 export default function Contributor() {
   const { login } = useParams()
-  const { data, loading, error } = useAsync(() => getContributor(login), [login])
-  return <><Navbar /><main className="mx-auto max-w-5xl px-5 py-12">
+  const { data, loading, error, retry } = useAsync(() => getContributor(login), [login])
+  return <Page width="max-w-5xl">
     {loading && <Loading label="Reading public GitHub activity…" />}
-    {error && <ErrorMessage message={error} />}
+    {error && <ErrorMessage message={error} onRetry={retry} />}
     {data && <>
       <div className="flex flex-wrap items-center gap-5">
         {data.avatar_url && <img src={data.avatar_url} alt={data.login} className="h-20 w-20 rounded-2xl" />}
@@ -42,5 +42,5 @@ export default function Contributor() {
         </section>
       </div>
     </>}
-  </main></>
+  </Page>
 }

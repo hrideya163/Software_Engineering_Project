@@ -1,12 +1,92 @@
-import { Compass, Github, LogOut, Menu, X } from 'lucide-react'; import { Link, NavLink } from 'react-router-dom'; import { useState } from 'react'; import { useApp } from '../context/AppContext'; import { loginWithGitHub, loginWithGoogle, logout } from '../api/authApi'
-function GoogleIcon(props) { return <svg viewBox="0 0 18 18" width="16" height="16" {...props}><path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92a8.78 8.78 0 0 0 2.68-6.62z"/><path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.81.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.71H.96v2.33A9 9 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.97 10.71a5.4 5.4 0 0 1 0-3.42V4.96H.96a9 9 0 0 0 0 8.08l3.01-2.33z"/><path fill="#EA4335" d="M9 3.58c1.32 0 2.51.45 3.44 1.35l2.59-2.59A8.6 8.6 0 0 0 9 0 9 9 0 0 0 .96 4.96l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58z"/></svg> }
-function AuthWidget() {
-  const { user, setUser, authProviders } = useApp()
-  if (!authProviders?.github && !authProviders?.google) return null
-  if (!user) return <div className="flex items-center gap-2">
-    {authProviders.github && <button onClick={loginWithGitHub} className="btn-secondary py-2.5"><Github size={16}/> GitHub</button>}
-    {authProviders.google && <button onClick={loginWithGoogle} className="btn-secondary py-2.5"><GoogleIcon/> Google</button>}
-  </div>
-  return <div className="flex items-center gap-2"><img src={user.avatarUrl} alt={user.login} className="h-8 w-8 rounded-full"/><span className="hidden text-sm font-bold sm:inline">{user.login}</span><button onClick={()=>logout().then(()=>setUser(null))} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100" title="Sign out"><LogOut size={16}/></button></div>
+import { ChevronDown, Compass, LogIn, LogOut, Menu, UserRound, X } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Link, NavLink, useLocation } from 'react-router-dom'
+import { useApp } from '../context/AppContext'
+
+export const NAV_LINKS = [['Explore', '/', true], ['For You', '/recommendations'], ['Profile', '/profile'], ['Model Card', '/model-card'], ['How It Works', '/how-it-works']]
+const PROVIDER_NAMES = { github: 'GitHub', google: 'Google' }
+
+export function Avatar({ user, size = 32 }) {
+  const initials = (user?.name || user?.login || '?').split(/[\s@._-]+/).filter(Boolean).slice(0, 2).map(part => part[0].toUpperCase()).join('')
+  return user?.avatarUrl
+    ? <img src={user.avatarUrl} alt="" width={size} height={size} className="shrink-0 rounded-full ring-1 ring-slate-200" style={{ width: size, height: size }} />
+    : <span className="grid shrink-0 place-items-center rounded-full bg-sky text-xs font-extrabold text-ink" style={{ width: size, height: size }}>{initials}</span>
 }
-export default function Navbar() { const [open,setOpen] = useState(false); const links=[['For You','/recommendations'],['Profile','/profile'],['Model Card','/model-card'],['How It Works','/how-it-works']]; return <header className="border-b border-slate-200 bg-white/90 backdrop-blur"><nav className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4"><Link to="/" className="flex items-center gap-2 font-extrabold text-ink"><span className="grid h-9 w-9 place-items-center rounded-xl bg-ink text-mint"><Compass size={20}/></span>ContriMap</Link><div className="hidden items-center gap-7 md:flex">{links.map(([name,to])=><NavLink key={name} to={to} className="text-sm font-semibold text-slate-600 hover:text-ink">{name}</NavLink>)}<AuthWidget/><Link className="btn-primary py-2.5" to="/#analyze">Analyze Repository <Github size={16}/></Link></div><button className="md:hidden" onClick={()=>setOpen(!open)}>{open?<X/>:<Menu/>}</button></nav>{open&&<div className="border-t px-5 pb-4 md:hidden"><div className="mb-3"><AuthWidget/></div>{links.map(([name,to])=><Link key={name} to={to} className="block py-3 text-sm font-semibold">{name}</Link>)}</div>}</header> }
+
+function AccountMenu({ onNavigate }) {
+  const { auth, signOut } = useApp()
+  const location = useLocation()
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+  useEffect(() => {
+    if (!open) return
+    const close = event => { if (!ref.current?.contains(event.target)) setOpen(false) }
+    const escape = event => event.key === 'Escape' && setOpen(false)
+    document.addEventListener('mousedown', close)
+    document.addEventListener('keydown', escape)
+    return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', escape) }
+  }, [open])
+
+  if (auth.status === 'loading') return <span className="h-9 w-24 animate-pulse rounded-xl bg-slate-100" aria-hidden="true" />
+  if (auth.status !== 'signed-in') {
+    // Without a configured provider there is nothing to sign in to; the app works fully signed-out.
+    if (!auth.configured) return null
+    const next = `${location.pathname}${location.search}`
+    return <Link to={`/sign-in?next=${encodeURIComponent(next)}`} onClick={onNavigate} className="btn-secondary py-2"><LogIn size={16} />Sign in</Link>
+  }
+  const user = auth.user
+  return <div className="relative" ref={ref}>
+    <button type="button" onClick={() => setOpen(!open)} aria-haspopup="menu" aria-expanded={open} className="flex items-center gap-2 rounded-xl py-1 pl-1 pr-2 hover:bg-slate-100">
+      <Avatar user={user} />
+      <span className="max-w-[140px] truncate text-sm font-bold">{user.name || user.login}</span>
+      <ChevronDown size={14} className="text-slate-400" />
+    </button>
+    {open && <div role="menu" className="absolute right-0 z-50 mt-2 w-64 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-soft">
+      <div className="flex items-center gap-3 border-b border-slate-100 p-4">
+        <Avatar user={user} size={40} />
+        <div className="min-w-0"><p className="truncate text-sm font-extrabold">{user.name || user.login}</p><p className="truncate text-xs text-slate-500">{user.login} · {PROVIDER_NAMES[user.provider] || user.provider}</p></div>
+      </div>
+      <Link role="menuitem" to="/profile" onClick={() => { setOpen(false); onNavigate?.() }} className="flex items-center gap-2 px-4 py-3 text-sm font-semibold hover:bg-slate-50"><UserRound size={16} />Contributor profile</Link>
+      <button role="menuitem" type="button" onClick={() => { setOpen(false); onNavigate?.(); signOut() }} className="flex w-full items-center gap-2 border-t border-slate-100 px-4 py-3 text-left text-sm font-semibold text-rose-700 hover:bg-rose-50"><LogOut size={16} />Sign out</button>
+    </div>}
+  </div>
+}
+
+function Notice() {
+  const { notice, setNotice } = useApp()
+  useEffect(() => {
+    if (!notice) return
+    const timer = setTimeout(() => setNotice(null), 6000)
+    return () => clearTimeout(timer)
+  }, [notice, setNotice])
+  if (!notice) return null
+  const [tone, text] = notice
+  const style = tone === 'error' ? 'bg-rose-50 text-rose-800 border-rose-200' : tone === 'success' ? 'bg-emerald-50 text-emerald-800 border-emerald-200' : 'bg-sky text-ink border-blue-100'
+  return <div role="status" className={`border-b ${style}`}>
+    <div className="mx-auto flex max-w-[1600px] items-center justify-between gap-3 px-5 py-2.5 text-sm font-semibold">
+      <span>{text}</span>
+      <button type="button" onClick={() => setNotice(null)} aria-label="Dismiss" className="rounded p-1 hover:bg-black/5"><X size={14} /></button>
+    </div>
+  </div>
+}
+
+const linkClass = ({ isActive }) => `rounded-lg px-3 py-2 text-sm font-semibold transition ${isActive ? 'bg-sky text-ink' : 'text-slate-600 hover:bg-slate-50 hover:text-ink'}`
+
+export default function Navbar() {
+  const [open, setOpen] = useState(false)
+  const location = useLocation()
+  useEffect(() => setOpen(false), [location.pathname])
+  return <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur">
+    <nav className="mx-auto flex h-16 max-w-[1600px] items-center justify-between gap-4 px-5" aria-label="Main">
+      <Link to="/" className="flex items-center gap-2 font-extrabold text-ink"><span className="grid h-9 w-9 place-items-center rounded-xl bg-ink text-mint"><Compass size={20} /></span>ContriMap</Link>
+      <div className="hidden items-center gap-1 lg:flex">{NAV_LINKS.map(([name, to, end]) => <NavLink key={to} to={to} end={end} className={linkClass}>{name}</NavLink>)}</div>
+      <div className="hidden lg:block"><AccountMenu /></div>
+      <button type="button" className="rounded-lg p-2 hover:bg-slate-100 lg:hidden" onClick={() => setOpen(!open)} aria-label={open ? 'Close menu' : 'Open menu'} aria-expanded={open}>{open ? <X /> : <Menu />}</button>
+    </nav>
+    {open && <div className="border-t border-slate-200 px-5 pb-4 pt-2 lg:hidden">
+      <div className="flex flex-col">{NAV_LINKS.map(([name, to, end]) => <NavLink key={to} to={to} end={end} className={linkClass}>{name}</NavLink>)}</div>
+      <div className="mt-3 border-t border-slate-100 pt-3"><AccountMenu onNavigate={() => setOpen(false)} /></div>
+    </div>}
+    <Notice />
+  </header>
+}

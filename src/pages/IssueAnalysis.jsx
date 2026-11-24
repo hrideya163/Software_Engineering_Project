@@ -7,6 +7,7 @@ import DifficultyBadge from '../components/DifficultyBadge'
 import ErrorMessage from '../components/ErrorMessage'
 import FileTree from '../components/FileTree'
 import FlowGraph, { Legend } from '../components/FlowGraph'
+import { impactView } from '../utils/graphViews'
 import Loading from '../components/Loading'
 import { ConfidenceDot, ScoreBars } from '../components/RankedIssueCard'
 import SkillTag from '../components/SkillTag'
@@ -132,7 +133,8 @@ function Files({ a, history }) {
   </div>
 }
 
-function Impact({ a, owner, repo }) {
+function Impact({ a, owner, repo, history }) {
+  const graph = impactView(a.graph, history.data?.historical_files)
   return <div className="space-y-5">
     <div className="grid gap-4 sm:grid-cols-3">
       <Metric label="Blast radius" value={`${a.impact.dependents_within_2_hops} files`} sub="import the top candidates within two hops" />
@@ -144,8 +146,8 @@ function Impact({ a, owner, repo }) {
         <div><p className="eyebrow">Code neighbourhood</p><p className="mt-1 text-xs text-slate-500">Predicted files with the files that import them, the files they import and their tests. Hover a file to trace its links.</p></div>
         <Link to={`/repository/${owner}/${repo}/visualizer?issue=${a.issue.number}&view=impact`} className="btn-secondary"><Network size={16} />Open in visualizer</Link>
       </div>
-      {a.graph.nodes.length ? <FlowGraph graph={a.graph} height={460} /> : <p className="card p-6 text-sm text-slate-500">No import relationships were resolved for these files.</p>}
-      <Legend items={[['target', 'predicted file'], ['importer', 'imports it'], ['dependency', 'imported by it'], ['test', 'test']]} />
+      {graph ? <FlowGraph graph={graph} height={480} /> : <p className="card p-6 text-sm text-slate-500">No import relationships were resolved for these files.</p>}
+      <Legend items={[['target', 'likely change'], ['importer', 'imports it'], ['dependency', 'imported by it'], ['test', 'test'], ['historical', 'changed by a similar fix']]} />
     </section>
     <div className="grid gap-5 lg:grid-cols-2">
       <section className="card p-5">
@@ -205,7 +207,7 @@ function IssueAnalysisContent() {
   const { profile, isSet } = useProfile()
   const [params, setParams] = useSearchParams()
   const tab = TABS.some(([id]) => id === params.get('tab')) ? params.get('tab') : 'overview'
-  const { data: a, loading, error } = useAsync(() => getIssueAnalysis(owner, repo, issueId, isSet ? profile : null), [owner, repo, issueId])
+  const { data: a, loading, error, retry } = useAsync(() => getIssueAnalysis(owner, repo, issueId, isSet ? profile : null), [owner, repo, issueId])
   const [history, setHistory] = useState({ data: null, loading: false, error: '' })
   const [state, setState] = useState({})
   const user = feedbackUser(profile)
@@ -218,13 +220,13 @@ function IssueAnalysisContent() {
 
   // History costs GitHub requests, so it loads only when a tab that shows it is opened.
   useEffect(() => {
-    if (!a || !['files', 'history'].includes(tab) || history.data || history.loading || history.error) return
+    if (!a || !['files', 'history', 'impact'].includes(tab) || history.data || history.loading || history.error) return
     setHistory({ data: null, loading: true, error: '' })
     getSimilarHistory(owner, repo, a.issue.number).then(data => setHistory({ data, loading: false, error: '' })).catch(err => setHistory({ data: null, loading: false, error: err.message }))
   }, [a, tab]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (loading) return <AppLayout><Loading label="Running difficulty, effort, localization and explanation models…" /></AppLayout>
-  if (error) return <AppLayout><ErrorMessage message={error} /></AppLayout>
+  if (error) return <AppLayout><ErrorMessage message={error} onRetry={retry} /></AppLayout>
   const act = (action, patch) => {
     setState(previous => ({ ...previous, ...patch }))
     if (user) sendFeedback(user, a.repository, { number: a.issue.number, title: a.issue.title }, action).catch(() => {})
@@ -243,7 +245,7 @@ function IssueAnalysisContent() {
       </div>
     </div>
 
-    <nav className="sticky top-0 z-10 -mx-1 mt-6 flex gap-1 overflow-x-auto border-b border-slate-200 bg-[#f7f9fc]/95 px-1 backdrop-blur" aria-label="Analysis sections">
+    <nav className="sticky top-16 z-20 -mx-1 mt-6 flex gap-1 overflow-x-auto border-b border-slate-200 bg-[#f7f9fc]/95 px-1 backdrop-blur" aria-label="Analysis sections">
       {TABS.map(([id, label]) => <button key={id} type="button" onClick={() => setParams(previous => { const next = new URLSearchParams(previous); next.set('tab', id); return next }, { replace: true })} className={`whitespace-nowrap border-b-2 px-3 py-3 text-sm font-bold transition ${tab === id ? 'border-ink text-ink' : 'border-transparent text-slate-500 hover:text-ink'}`}>
         {id === 'files' && <Target size={14} className="mr-1.5 inline" />}{label}
       </button>)}
@@ -253,7 +255,7 @@ function IssueAnalysisContent() {
       {tab === 'overview' && <Overview a={a} />}
       {tab === 'fit' && <Fit a={a} />}
       {tab === 'files' && <Files a={a} history={history} />}
-      {tab === 'impact' && <Impact a={a} owner={owner} repo={repo} />}
+      {tab === 'impact' && <Impact a={a} owner={owner} repo={repo} history={history} />}
       {tab === 'history' && <SimilarHistory history={history} />}
       {tab === 'guide' && <Guide a={a} />}
     </div>

@@ -43,7 +43,7 @@ function IconButton({ label, onClick, active, children }) {
   return <button type="button" onClick={onClick} title={label} aria-label={label} aria-pressed={active} className={`grid h-8 w-8 place-items-center rounded-lg border transition ${active ? 'border-ink bg-ink text-white' : 'border-slate-200 text-slate-500 hover:border-slate-300 hover:text-ink'}`}>{children}</button>
 }
 
-export default function RankedIssueCard({ item, owner, repo, weights, onDismiss }) {
+export default function RankedIssueCard({ item, owner, repo, weights, onDismiss, onFeedback }) {
   const issue = item.issue
   const repository = item.repository || `${owner}/${repo}`
   const [o, r] = repository.split('/')
@@ -52,7 +52,7 @@ export default function RankedIssueCard({ item, owner, repo, weights, onDismiss 
   const user = feedbackUser(profile)
   const act = (action, patch) => {
     setState(previous => ({ ...previous, ...patch }))
-    if (user) sendFeedback(user, repository, { number: issue.number, title: issue.title, summary: item.summary }, action).catch(() => {})
+    if (user) sendFeedback(user, repository, { number: issue.number, title: issue.title, summary: item.summary }, action).then(() => onFeedback?.(action)).catch(() => {})
   }
   if (state.dismissed) {
     return <article className="flex items-center justify-between gap-3 rounded-2xl border border-dashed border-slate-200 px-4 py-3 text-xs text-slate-500">
@@ -61,6 +61,10 @@ export default function RankedIssueCard({ item, owner, repo, weights, onDismiss 
     </article>
   }
   const reasons = topReasons(item.components, weights)
+  const matched = item.matched_skills || []
+  // Skills already shown as "Learn ..." are not repeated as gaps.
+  const learning = new Set((item.learning?.new_skills || []).slice(0, 2).map(skill => skill.name))
+  const gaps = (item.skill_gaps || []).filter(skill => !learning.has(skill.name))
   return <article className={`card group flex flex-col p-4 transition hover:shadow-md ${state.completed ? 'opacity-70' : ''}`}>
     <div className="flex items-start gap-3">
       <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-sky text-center" title="Overall score (0-100) from the ranking components">
@@ -78,8 +82,13 @@ export default function RankedIssueCard({ item, owner, repo, weights, onDismiss 
     </div>
     {(reasons.length > 0 || item.learning?.new_skills?.length > 0) && <div className="mt-3 flex flex-wrap gap-1.5">
       {reasons.map(reason => <span key={reason} className="rounded-md bg-emerald-50 px-1.5 py-0.5 text-[11px] font-bold text-emerald-700">{reason}</span>)}
-      {item.learning?.new_skills?.length > 0 && <span className="inline-flex items-center gap-1 rounded-md bg-violet-50 px-1.5 py-0.5 text-[11px] font-bold text-violet-700"><GraduationCap size={11} />{item.learning.new_skills.slice(0, 2).map(s => s.name).join(', ')}</span>}
+      {item.learning?.new_skills?.length > 0 && <span className="inline-flex items-center gap-1 rounded-md bg-violet-50 px-1.5 py-0.5 text-[11px] font-bold text-violet-700" title="Skills you would learn or practise on this issue"><GraduationCap size={11} />Learn {item.learning.new_skills.slice(0, 2).map(s => s.name).join(', ')}</span>}
     </div>}
+    {(matched.length > 0 || gaps.length > 0) && <p className="mt-2 text-[11px] leading-4 text-slate-500">
+      {matched.length > 0 && <>Uses your <b className="text-slate-700">{matched.slice(0, 3).map(s => s.name).join(', ')}</b></>}
+      {matched.length > 0 && gaps.length > 0 && ' · '}
+      {gaps.length > 0 && <>also needs <b className="text-amber-700">{gaps.slice(0, 2).map(s => s.name).join(', ')}</b></>}
+    </p>}
     <div className="mt-auto flex items-center justify-between gap-2 pt-4">
       <Link to={`/repository/${o}/${r}/issues/${issue.number}`} className="inline-flex items-center gap-1 text-xs font-bold text-ink hover:text-blue-700">Analyze <ArrowUpRight size={14} /></Link>
       <div className="flex gap-1.5">

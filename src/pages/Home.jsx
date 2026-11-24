@@ -1,3 +1,67 @@
-import { ArrowRight, BrainCircuit, GitFork, GitPullRequest, Network, Route, SearchCheck, ShieldCheck } from 'lucide-react'; import { Link, useNavigate } from 'react-router-dom'; import { useState } from 'react'; import Navbar from '../components/Navbar'; import AnimatedLogoBackground from '../components/AnimatedLogoBackground'; import DifficultyBadge from '../components/DifficultyBadge'; import SkillTag from '../components/SkillTag'; import { parseGitHubUrl } from '../utils/helpers'; import TrendingRepos from '../components/TrendingRepos'
-const problems=[['Find the Right Issue',SearchCheck,'Match issues to your skills, time, and experience.'],["Understand What's Required",BrainCircuit,'See the context, concepts, and files before you begin.'],['Know Where to Start',Route,'Follow a practical path from reading to pull request.']]; const features=[['Difficulty Estimation',ShieldCheck],['Skill Analysis',BrainCircuit],['Repository Impact',Network],['Similar Contributions',GitPullRequest],['Contribution Path',Route]];
-export default function Home(){const [url,setUrl]=useState(''); const [error,setError]=useState(''); const navigate=useNavigate(); const submit=e=>{e.preventDefault(); const result=parseGitHubUrl(url); if(!result) return setError('Enter a valid GitHub repository URL, such as github.com/vercel/next.js.'); navigate(`/repository/${result.owner}/${result.repo}`)}; return <><Navbar/><main><section className="relative overflow-hidden bg-[#091322] px-5 py-20 text-center md:py-28"><AnimatedLogoBackground/><div className="relative z-10 mx-auto max-w-3xl"><p className="eyebrow text-sky-300">Intelligent open-source navigation</p><h1 className="mt-5 text-4xl font-extrabold tracking-tight text-white md:text-6xl">Find Your Next <span className="text-sky-300">Open-Source</span> Contribution.</h1><p className="mx-auto mt-6 max-w-2xl text-base leading-7 text-slate-300">ContriMap turns unfamiliar GitHub repositories into clear contribution opportunities—matching issues to your skills, mapping impact, and guiding your next pull request.</p><form id="analyze" onSubmit={submit} className="mx-auto mt-8 flex max-w-2xl flex-col gap-3 rounded-2xl bg-white p-3 shadow-soft sm:flex-row"><input value={url} onChange={e=>{setUrl(e.target.value);setError('')}} placeholder="Enter GitHub repository URL" className="min-w-0 flex-1 rounded-xl px-4 outline-none"/><button className="btn-primary">Analyze Repository <ArrowRight size={17}/></button></form>{error&&<p className="mt-3 text-sm font-semibold text-rose-300">{error}</p>}<Link to="/how-it-works" className="mt-5 inline-flex items-center gap-2 text-sm font-bold text-white hover:text-sky-300">See How It Works <ArrowRight size={15}/></Link></div></section><TrendingRepos/><section className="mx-auto max-w-6xl px-5 py-20"><p className="eyebrow">The contributor gap</p><h2 className="mt-3 max-w-xl text-3xl font-extrabold">Open Source Has Thousands of Issues. Where Do You Start?</h2><div className="mt-9 grid gap-5 md:grid-cols-3">{problems.map(([title,Icon,text])=><div className="card p-6" key={title}><Icon className="text-blue-700"/><h3 className="mt-5 font-extrabold">{title}</h3><p className="mt-2 text-sm leading-6 text-slate-600">{text}</p></div>)}</div></section><section id="features" className="bg-ink px-5 py-20 text-white"><div className="mx-auto max-w-6xl"><p className="eyebrow text-mint">Built for momentum</p><h2 className="mt-3 text-3xl font-extrabold">Everything you need to make a confident first move.</h2><div className="mt-9 grid gap-4 sm:grid-cols-2 lg:grid-cols-5">{features.map(([title,Icon])=><div className="rounded-2xl border border-white/10 bg-white/5 p-5" key={title}><Icon className="text-mint"/><p className="mt-6 text-sm font-bold">{title}</p></div>)}</div></div></section><section className="mx-auto grid max-w-6xl gap-10 px-5 py-16 md:grid-cols-[1fr_.9fr] md:items-center"><div><p className="eyebrow">Product preview</p><h2 className="mt-3 text-3xl font-extrabold">Context before code.</h2><p className="mt-4 leading-7 text-slate-600">Explore a complete issue brief, understand its repository footprint, and work from a tailored contribution checklist.</p></div><div className="card p-6"><div className="flex justify-between"><div><p className="mono text-xs text-slate-500">#1842</p><h3 className="mt-1 font-extrabold">Improve Router error handling</h3></div><DifficultyBadge level="Easy"/></div><div className="mt-5 grid grid-cols-2 gap-3 text-sm"><div className="rounded-xl bg-sky p-3"><b>Stack match</b><br/><span className="text-xs text-slate-600">from your profile</span></div><div className="rounded-xl bg-slate-50 p-3"><b>Effort</b><br/><span className="text-xs text-slate-600">human-calibrated</span></div></div><div className="mt-4 flex gap-2"><SkillTag>React</SkillTag><SkillTag>Testing</SkillTag></div><button className="btn-primary mt-5 w-full">Generate Contribution Path <ArrowRight size={16}/></button></div></section></main></> }
+import { ArrowRight, Gauge, History, Network, Sparkles, Target } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
+import AnimatedLogoBackground from '../components/AnimatedLogoBackground'
+import Navbar from '../components/Navbar'
+import TrendingRepos from '../components/TrendingRepos'
+import { parseRepository } from '../utils/helpers'
+
+const CAPABILITIES = [
+  [Target, 'Likely files to change', 'A two-stage ranker reads the code of its top candidates and points to where a fix is likely to land.'],
+  [Gauge, 'Difficulty and effort', 'Easy, medium or hard with a confidence level, plus a realistic effort range.'],
+  [History, 'Similar past fixes', 'Closed issues and merged pull requests that solved something similar, with the files they changed.'],
+  [Network, 'Architecture and impact', 'An interactive map of how the code fits together and what a change could affect.'],
+]
+
+export default function Home() {
+  const [value, setValue] = useState('')
+  const [error, setError] = useState('')
+  const navigate = useNavigate()
+  const location = useLocation()
+  const input = useRef(null)
+  useEffect(() => { if (location.hash === '#analyze') input.current?.focus() }, [location.hash])
+  const submit = event => {
+    event.preventDefault()
+    const result = parseRepository(value)
+    if (!result) return setError('Enter a GitHub repository as owner/name or a github.com URL, for example pallets/click.')
+    navigate(`/repository/${result.owner}/${result.repo}`)
+  }
+  return <>
+    <Navbar />
+    <main>
+      <section className="relative overflow-hidden bg-[#091322] px-5 py-20 text-center md:py-24">
+        <AnimatedLogoBackground />
+        <div className="relative z-10 mx-auto max-w-3xl">
+          <p className="eyebrow text-sky-300">Open-source contribution guide</p>
+          <h1 className="mt-5 text-4xl font-extrabold tracking-tight text-white md:text-6xl">Find your next <span className="text-sky-300">open-source</span> contribution.</h1>
+          <p className="mx-auto mt-6 max-w-2xl text-base leading-7 text-slate-300">ContriMap ranks a repository's open issues, shows where each fix is likely to land, how hard it is and what similar fixes looked like, so you can choose with confidence.</p>
+          <form id="analyze" onSubmit={submit} className="mx-auto mt-8 flex max-w-2xl flex-col gap-3 rounded-2xl bg-white p-2.5 shadow-soft sm:flex-row" noValidate>
+            <label htmlFor="repository" className="sr-only">GitHub repository</label>
+            <input id="repository" ref={input} value={value} onChange={event => { setValue(event.target.value); setError('') }} placeholder="owner/name or github.com URL" autoComplete="off" className="min-w-0 flex-1 rounded-xl px-4 py-3 outline-none" aria-invalid={Boolean(error)} aria-describedby={error ? 'repository-error' : undefined} />
+            <button className="btn-primary">Analyze repository <ArrowRight size={17} /></button>
+          </form>
+          {error && <p id="repository-error" className="mt-3 text-sm font-semibold text-rose-300">{error}</p>}
+          <p className="mt-5 text-sm text-slate-400">Try <button type="button" onClick={() => navigate('/repository/pallets/click')} className="font-bold text-white hover:text-sky-300">pallets/click</button> or pick a trending repository below.</p>
+        </div>
+      </section>
+
+      <TrendingRepos />
+
+      <section className="border-t border-slate-200 bg-white px-5 py-16">
+        <div className="mx-auto max-w-6xl">
+          <p className="eyebrow">What you get for every issue</p>
+          <h2 className="mt-3 max-w-2xl text-3xl font-extrabold">Context before code.</h2>
+          <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">{CAPABILITIES.map(([Icon, title, text]) => <div key={title} className="rounded-2xl border border-slate-200 p-5">
+            <span className="grid h-10 w-10 place-items-center rounded-xl bg-sky text-blue-700"><Icon size={19} /></span>
+            <h3 className="mt-4 font-extrabold">{title}</h3>
+            <p className="mt-2 text-sm leading-6 text-slate-600">{text}</p>
+          </div>)}</div>
+          <div className="mt-8 flex flex-wrap items-center gap-3">
+            <Link to="/recommendations" className="btn-primary"><Sparkles size={16} />Get issues picked for you</Link>
+            <Link to="/model-card" className="btn-secondary">See how accurate the models are</Link>
+          </div>
+        </div>
+      </section>
+    </main>
+  </>
+}

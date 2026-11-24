@@ -1,65 +1,86 @@
-import { Background, Controls, Handle, MarkerType, MiniMap, Panel, Position, ReactFlow, useReactFlow, useStore } from '@xyflow/react'
+import { Background, Handle, MarkerType, MiniMap, Panel, Position, ReactFlow, ReactFlowProvider, useReactFlow, useStore } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { Maximize2, Minimize2 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { ChevronRight, FolderOpen, Maximize, Maximize2, Minimize2, Minus, Plus } from 'lucide-react'
+import { memo, useEffect, useMemo, useState } from 'react'
+import { NODE_HEIGHT, NODE_WIDTH } from '../utils/graphLayout'
 
 // Shared palette (same hues as the repository dashboard charts).
 export const MODULE_COLORS = ['#2d7ef7', '#0eaa7d', '#f59e0b', '#7c3aed', '#06b6d4', '#ec4899', '#64748b', '#ef4444']
 export const ROLE_COLORS = { target: '#e11d48', historical: '#d97706', importer: '#2d7ef7', dependency: '#0eaa7d', test: '#7c3aed', directory: '#10233e', external: '#94a3b8', module_file: '#64748b' }
-const ROLE_LABELS = { target: 'Likely change', historical: 'Changed by a similar fix', importer: 'Imports it', dependency: 'Imported by it', test: 'Test', module_file: 'Source file', external: 'Outside this module' }
+const ROLE_LABELS = { target: 'Likely to change', historical: 'Changed by a similar fix', importer: 'Imports it', dependency: 'Imported by it', test: 'Test', external: 'Outside this directory' }
 
 export const moduleColor = community => (community === null || community === undefined ? '#94a3b8' : MODULE_COLORS[Number(community) % MODULE_COLORS.length])
 
-const hidden = { opacity: 0, width: 6, height: 6, border: 0, background: 'transparent' }
+const hidden = { opacity: 0, width: 6, height: 6, border: 0, background: 'transparent', pointerEvents: 'none' }
+const splitPath = path => {
+  const parts = String(path || '').split('/')
+  return { name: parts.pop() || path, parent: parts.join('/') }
+}
 
-function DirectoryNode({ data }) {
-  const ring = data.selected ? 'ring-2 ring-ink' : data.highlight ? 'ring-2 ring-rose-300' : data.match ? 'ring-2 ring-mint' : ''
-  return <div className={`relative w-[220px] rounded-xl border bg-white shadow-sm transition-all duration-200 hover:shadow-md ${data.highlight ? 'border-rose-400' : 'border-slate-200'} ${ring}`} style={{ opacity: data.dimmed ? 0.28 : 1 }}>
-    <Handle type="target" position={Position.Left} style={hidden} />
-    <div className="flex items-stretch">
-      <span className="w-1.5 shrink-0 rounded-l-xl" style={{ background: data.color }} />
-      <div className="min-w-0 flex-1 px-3 py-2">
-        <p className="mono truncate text-[12px] font-medium text-ink" title={data.label}>{data.label}</p>
-        <p className="mt-0.5 text-[10px] font-semibold text-slate-500">{data.files} files{data.language ? ` · ${data.language}` : ''}</p>
-        <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-100" title={`Share of import-graph importance: ${Math.round(data.importanceShare * 100)}%`}>
-          <div className="h-full rounded-full" style={{ width: `${Math.max(4, data.importanceShare * 100)}%`, background: data.color }} />
-        </div>
-      </div>
+function Shell({ data, accent, dashed, children, badge }) {
+  const ring = data.selected ? 'ring-2 ring-ink ring-offset-1' : data.match ? 'ring-2 ring-mint' : data.highlight > 0 || data.role === 'target' ? 'ring-2 ring-rose-200' : ''
+  return <div className={`relative rounded-xl border bg-white shadow-sm transition-[opacity,box-shadow] duration-200 hover:shadow-md ${dashed ? 'border-dashed border-slate-300 bg-slate-50' : data.highlight > 0 ? 'border-rose-300' : 'border-slate-200'} ${ring}`} style={{ width: NODE_WIDTH, minHeight: NODE_HEIGHT, opacity: data.dimmed ? 0.25 : 1 }}>
+    <Handle type="target" position={Position.Left} style={hidden} isConnectable={false} />
+    <div className="flex h-full items-stretch" style={{ minHeight: NODE_HEIGHT }}>
+      <span className="w-1.5 shrink-0 rounded-l-xl" style={{ background: accent }} />
+      <div className="min-w-0 flex-1 px-3 py-2">{children}</div>
     </div>
-    {data.highlight > 0 && <span className="absolute -top-2 right-2 rounded-full bg-rose-500 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-white">likely fix</span>}
-    <Handle type="source" position={Position.Right} style={hidden} />
+    {badge}
+    <Handle type="source" position={Position.Right} style={hidden} isConnectable={false} />
   </div>
 }
 
-function FileNode({ data }) {
-  const color = data.role === 'module_file' ? data.color : (ROLE_COLORS[data.role] || '#64748b')
-  const ring = data.selected ? 'ring-2 ring-ink' : data.match ? 'ring-2 ring-mint' : data.role === 'target' ? 'ring-2 ring-rose-200' : ''
-  return <div className={`relative w-[230px] rounded-xl border bg-white shadow-sm transition-all duration-200 hover:shadow-md ${data.role === 'external' ? 'border-dashed border-slate-300 bg-slate-50' : 'border-slate-200'} ${ring}`} style={{ opacity: data.dimmed ? 0.28 : 1 }}>
-    <Handle type="target" position={Position.Left} style={hidden} />
-    <div className="flex items-stretch">
-      <span className="w-1.5 shrink-0 rounded-l-xl" style={{ background: color }} />
-      <div className="min-w-0 flex-1 px-3 py-2">
-        <div className="flex items-center gap-1.5">
-          {data.rank && <span className="rounded bg-rose-100 px-1 text-[10px] font-bold text-rose-700">#{data.rank}</span>}
-          <p className="mono truncate text-[12px] font-medium text-ink" title={data.path}>{data.label}</p>
-        </div>
-        {data.role === 'module_file' ? <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-100" title="Importance within the import graph"><div className="h-full rounded-full" style={{ width: `${Math.max(4, (data.importance_share || 0) * 100)}%`, background: color }} /></div>
-          : data.role === 'external' ? <p className="mt-0.5 text-[10px] text-slate-500">{data.direction === 'in' ? 'imports this module' : 'imported by this module'} · {data.imports} links</p>
-          : <p className="mono mt-0.5 truncate text-[10px] text-slate-400" title={data.path}>{data.path}</p>}
-        {data.role !== 'module_file' && data.role !== 'external' && <p className="mt-1 text-[10px] font-bold uppercase tracking-wide" style={{ color }}>{ROLE_LABELS[data.role] || data.role}</p>}
-      </div>
-    </div>
-    {data.historical && data.role !== 'historical' && <span className="absolute -top-2 right-2 rounded-full bg-amber-500 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-white" title="Also changed by the fix of a similar past issue">history</span>}
-    <Handle type="source" position={Position.Right} style={hidden} />
-  </div>
-}
+const Badge = ({ tone, children, title }) => <span title={title} className={`absolute -top-2 right-2 rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-white shadow-sm ${tone}`}>{children}</span>
 
-const nodeTypes = { directory: DirectoryNode, file: FileNode }
+const DirectoryNode = memo(function DirectoryNode({ data }) {
+  const { name, parent } = splitPath(data.label)
+  return <Shell data={data} accent={data.color} badge={data.highlight > 0 && <Badge tone="bg-rose-500" title="Contains files the selected issue is likely to change">likely fix</Badge>}>
+    <div className="flex items-center gap-1.5">
+      <FolderOpen size={13} className="shrink-0 text-slate-400" />
+      <p className="mono min-w-0 flex-1 truncate text-[12.5px] font-medium text-ink" title={data.label}>{parent && <span className="text-slate-400">{parent}/</span>}{name}</p>
+      <ChevronRight size={13} className="shrink-0 text-slate-300" aria-hidden="true" />
+    </div>
+    <p className="mt-0.5 text-[10.5px] font-semibold text-slate-500">{data.files} files{data.language ? ` · ${data.language}` : ''}</p>
+    <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-100" title={`Share of import-graph importance: ${Math.round((data.importanceShare || 0) * 100)}%`}>
+      <div className="h-full rounded-full" style={{ width: `${Math.max(4, (data.importanceShare || 0) * 100)}%`, background: data.color }} />
+    </div>
+  </Shell>
+})
+
+const FileNode = memo(function FileNode({ data }) {
+  const { name, parent } = splitPath(data.path || data.label)
+  const isModule = data.role === 'module_file'
+  const isExternal = data.role === 'external'
+  const accent = isModule ? data.color : ROLE_COLORS[data.role] || '#64748b'
+  const badge = data.historical && data.role !== 'historical'
+    ? <Badge tone="bg-amber-500" title="Also changed by the fix of a similar past issue">history</Badge>
+    : null
+  return <Shell data={data} accent={accent} dashed={isExternal} badge={badge}>
+    <div className="flex items-center gap-1.5">
+      {data.rank && <span className="shrink-0 rounded bg-rose-100 px-1 text-[10px] font-bold text-rose-700">#{data.rank}</span>}
+      <p className="mono min-w-0 flex-1 truncate text-[12.5px] font-medium text-ink" title={data.path}>{isExternal ? data.label : name}</p>
+    </div>
+    {isExternal
+      ? <p className="mt-0.5 text-[10.5px] text-slate-500">{data.direction === 'in' ? 'imports this directory' : 'imported from here'} · {data.imports} links · open</p>
+      : <p className="mono mt-0.5 truncate text-[10.5px] text-slate-400" title={parent}>{parent || '(root)'}</p>}
+    {isModule
+      ? <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-100" title="Importance within the import graph"><div className="h-full rounded-full" style={{ width: `${Math.max(4, (data.importance_share || 0) * 100)}%`, background: accent }} /></div>
+      : !isExternal && <p className="mt-1 text-[10px] font-bold uppercase tracking-wide" style={{ color: accent }}>{ROLE_LABELS[data.role] || data.role}</p>}
+  </Shell>
+})
+
+// Column headings for the issue-impact view and the "not connected" group.
+const LaneNode = memo(function LaneNode({ data }) {
+  return <div className="pointer-events-none select-none" style={{ width: data.width || NODE_WIDTH }}>
+    <p className="text-[11px] font-extrabold uppercase tracking-[.14em] text-slate-500">{data.label}</p>
+    {data.hint && <p className="mt-0.5 text-[11px] text-slate-400">{data.hint}</p>}
+  </div>
+})
+
+const nodeTypes = { directory: DirectoryNode, file: FileNode, lane: LaneNode }
 
 // Centres the view on the focused nodes (search result, selection, likely fix sites) at a readable zoom.
 // Computed from the payload positions, so it does not depend on nodes having been measured yet.
-const NODE_SIZE = { width: 230, height: 70 }
-
 function FocusController({ ids, positions, minZoom = 0.3, maxZoom = 1.1, padding = 80 }) {
   const { setViewport } = useReactFlow()
   const width = useStore(state => state.width)
@@ -69,27 +90,45 @@ function FocusController({ ids, positions, minZoom = 0.3, maxZoom = 1.1, padding
     const points = ids.map(id => positions[id]).filter(Boolean)
     if (!points.length || !width || !height) return
     const left = Math.min(...points.map(p => p.x)), top = Math.min(...points.map(p => p.y))
-    const right = Math.max(...points.map(p => p.x)) + NODE_SIZE.width, bottom = Math.max(...points.map(p => p.y)) + NODE_SIZE.height
+    const right = Math.max(...points.map(p => p.x)) + NODE_WIDTH, bottom = Math.max(...points.map(p => p.y)) + NODE_HEIGHT
     const zoom = Math.min(maxZoom, Math.max(minZoom, Math.min((width - 2 * padding) / (right - left), (height - 2 * padding) / (bottom - top))))
     setViewport({ x: width / 2 - ((left + right) / 2) * zoom, y: height / 2 - ((top + bottom) / 2) * zoom, zoom }, { duration: 450 })
   }, [key, width, height]) // eslint-disable-line react-hooks/exhaustive-deps
   return null
 }
 
+function Toolbar({ fullscreen, setFullscreen }) {
+  const { zoomIn, zoomOut, fitView } = useReactFlow()
+  const button = 'grid h-8 w-8 place-items-center text-slate-600 hover:bg-slate-50 hover:text-ink'
+  return <Panel position="top-right">
+    <div className="flex overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm" role="toolbar" aria-label="Map controls">
+      <button type="button" className={button} onClick={() => zoomIn({ duration: 200 })} title="Zoom in" aria-label="Zoom in"><Plus size={15} /></button>
+      <button type="button" className={`${button} border-l border-slate-100`} onClick={() => zoomOut({ duration: 200 })} title="Zoom out" aria-label="Zoom out"><Minus size={15} /></button>
+      <button type="button" className={`${button} border-l border-slate-100`} onClick={() => fitView({ padding: 0.12, duration: 300 })} title="Fit everything in view" aria-label="Fit everything in view"><Maximize size={14} /></button>
+      <button type="button" className={`flex h-8 items-center gap-1.5 border-l border-slate-100 px-2.5 text-xs font-bold text-ink hover:bg-slate-50`} onClick={() => setFullscreen(!fullscreen)} title={fullscreen ? 'Exit full screen (Esc)' : 'Full screen'}>
+        {fullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}<span className="hidden sm:inline">{fullscreen ? 'Exit' : 'Full screen'}</span>
+      </button>
+    </div>
+  </Panel>
+}
+
 /**
- * Renders backend graph payloads (codegraph.architecture_view / issue_view).
- * Hovering or selecting a node focuses it and its direct neighbours; everything else fades.
+ * Renders graph payloads ({nodes, edges} with positions). Hovering or selecting a node focuses it and its
+ * direct neighbours; everything else fades. `focusIds` pans/zooms to nodes; `initialIds` sets the opening view.
  */
-export default function FlowGraph({ graph, height = 520, onNodeClick, onNodeDoubleClick, onPaneClick, selectedId = null, matchIds = null, focusIds = [], showMiniMap = true }) {
+function FlowGraphInner({ graph, height, onNodeClick, onNodeDoubleClick, onPaneClick, selectedId, matchIds, focusIds, initialIds, showMiniMap }) {
   const [hovered, setHovered] = useState(null)
   const [fullscreen, setFullscreen] = useState(false)
 
   useEffect(() => {
-    if (!fullscreen) return
-    const close = event => event.key === 'Escape' && setFullscreen(false)
-    window.addEventListener('keydown', close)
-    return () => window.removeEventListener('keydown', close)
-  }, [fullscreen])
+    const handle = event => {
+      if (event.key !== 'Escape') return
+      if (fullscreen) setFullscreen(false)
+      else onPaneClick?.()
+    }
+    window.addEventListener('keydown', handle)
+    return () => window.removeEventListener('keydown', handle)
+  }, [fullscreen, onPaneClick])
 
   const neighbours = useMemo(() => {
     const map = {}
@@ -107,9 +146,8 @@ export default function FlowGraph({ graph, height = 520, onNodeClick, onNodeDoub
 
   const nodes = useMemo(() => (graph?.nodes || []).map(node => {
     const data = node.data || {}
+    if (node.type === 'lane') return { id: node.id, type: 'lane', position: node.position, data, draggable: false, selectable: false, focusable: false }
     const isDirectory = node.type === 'directory'
-    const dimmedByFocus = focusSet ? !focusSet.has(node.id) : false
-    const dimmedBySearch = matchIds ? !matchIds.has(node.id) : false
     return {
       id: node.id,
       type: isDirectory ? 'directory' : 'file',
@@ -121,9 +159,8 @@ export default function FlowGraph({ graph, height = 520, onNodeClick, onNodeDoub
         color: moduleColor(data.community),
         importanceShare: (data.importance || 0) / maxImportance,
         selected: node.id === selectedId,
-        importance_share: data.importance_share,
         match: matchIds ? matchIds.has(node.id) : false,
-        dimmed: dimmedByFocus || dimmedBySearch,
+        dimmed: (focusSet ? !focusSet.has(node.id) : false) || (matchIds ? !matchIds.has(node.id) : false),
       },
     }
   }), [graph, focusSet, matchIds, selectedId, maxImportance])
@@ -131,56 +168,47 @@ export default function FlowGraph({ graph, height = 520, onNodeClick, onNodeDoub
   const edges = useMemo(() => (graph?.edges || []).map(edge => {
     const active = focus && (edge.source === focus || edge.target === focus)
     const imports = edge.data?.imports || 0
-    const isTest = edge.data?.type === 'tests'
-    const isSoft = edge.data?.type === 'external' || edge.data?.type === 'history'
-    const color = active ? '#10233e' : isTest ? '#a78bfa' : edge.data?.type === 'history' ? '#fbbf24' : '#cbd5e1'
+    const kind = edge.data?.type
+    const soft = kind === 'external' || kind === 'history'
+    const color = active ? '#10233e' : kind === 'tests' ? '#a78bfa' : soft ? '#cbd5e1' : '#94a3b8'
     return {
       id: edge.id, source: edge.source, target: edge.target,
       animated: Boolean(active),
-      markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14, color },
-      style: { strokeWidth: imports ? Math.min(6, 1.2 + Math.log2(imports)) : 1.5, stroke: color, opacity: focus && !active ? 0.25 : 1, strokeDasharray: isTest || isSoft ? '5 4' : undefined },
+      focusable: false,
+      markerEnd: { type: MarkerType.ArrowClosed, width: 12, height: 12, color },
+      style: { strokeWidth: active ? 2.2 : imports ? Math.min(4, 1 + Math.log2(imports) * 0.6) : 1.2, stroke: color, opacity: focus ? (active ? 1 : 0.12) : soft ? 0.5 : 0.55, strokeDasharray: kind === 'tests' || soft ? '5 4' : undefined },
       label: active && imports > 1 ? `${imports} imports` : undefined,
       labelStyle: { fontSize: 10, fontWeight: 700, fill: '#10233e' },
       labelBgStyle: { fill: '#ffffff' },
+      labelBgPadding: [4, 2],
       zIndex: active ? 10 : 0,
     }
   }), [graph, focus])
 
-  // Large graphs open on their most relevant part at a readable zoom (likely fix sites, else the most
-  // central nodes); "fit view" in the controls and the minimap still give the whole picture.
-  const initialIds = useMemo(() => {
-    const all = graph?.nodes || []
-    if (all.length <= 12) return []
-    // Strongest likely fix sites (weak ones far away would zoom the view out to unreadable).
-    const best = Math.max(0, ...all.map(node => node.data?.highlight || 0))
-    const highlighted = all.filter(node => (best > 0 && (node.data?.highlight || 0) >= 0.5 * best) || node.type === 'target').map(node => node.id)
-    if (highlighted.length) return highlighted
-    // The core: nodes carrying a meaningful share of the import-graph importance (at most 6).
-    const top = Math.max(...all.map(node => node.data?.importance || 0))
-    return [...all].filter(node => (node.data?.importance || 0) >= 0.15 * top).sort((a, b) => (b.data?.importance || 0) - (a.data?.importance || 0)).slice(0, 6).map(node => node.id)
-  }, [graph])
-
   const frame = fullscreen ? 'fixed inset-0 z-50 rounded-none bg-[#f7f9fc]' : 'relative rounded-2xl border border-slate-200 bg-[#fbfcfe]'
   return <div className={`overflow-hidden ${frame}`} style={{ height: fullscreen ? '100vh' : height }}>
     <ReactFlow
-      nodes={nodes} edges={edges} nodeTypes={nodeTypes} fitView={!initialIds.length} fitViewOptions={{ padding: 0.15 }} minZoom={0.1} maxZoom={2}
-      nodesConnectable={false} nodesDraggable={false} elementsSelectable
-      onNodeClick={onNodeClick} onNodeDoubleClick={onNodeDoubleClick} onPaneClick={onPaneClick} zoomOnDoubleClick={!onNodeDoubleClick}
-      onNodeMouseEnter={(_, node) => setHovered(node.id)} onNodeMouseLeave={() => setHovered(null)}
+      nodes={nodes} edges={edges} nodeTypes={nodeTypes} fitView={!initialIds.length} fitViewOptions={{ padding: 0.12 }} minZoom={0.08} maxZoom={1.8}
+      nodesConnectable={false} nodesDraggable={false} elementsSelectable={false} onlyRenderVisibleElements={nodes.length > 120}
+      onNodeClick={(event, node) => node.type !== 'lane' && onNodeClick?.(event, node)}
+      onNodeDoubleClick={onNodeDoubleClick} onPaneClick={onPaneClick} zoomOnDoubleClick={!onNodeDoubleClick}
+      onNodeMouseEnter={(_, node) => node.type !== 'lane' && setHovered(node.id)} onNodeMouseLeave={() => setHovered(null)}
       proOptions={{ hideAttribution: true }}
     >
-      <Background gap={22} size={1.2} color="#dbe3ee" />
-      <Controls showInteractive={false} position="bottom-left" />
-      {showMiniMap && <MiniMap pannable zoomable position="bottom-right" nodeColor={node => (node.data?.highlight > 0 ? '#e11d48' : node.data?.role && node.data.role !== 'directory' ? ROLE_COLORS[node.data.role] : node.data?.color || '#94a3b8')} nodeStrokeWidth={0} maskColor="rgba(16,35,62,.06)" className="!rounded-xl !border !border-slate-200" />}
-      <Panel position="top-right">
-        <button type="button" onClick={() => setFullscreen(!fullscreen)} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-bold text-ink shadow-sm hover:bg-slate-50" title={fullscreen ? 'Exit full screen (Esc)' : 'Full screen'}>
-          {fullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}{fullscreen ? 'Exit' : 'Full screen'}
-        </button>
-      </Panel>
-      <FocusController ids={initialIds} positions={positions} minZoom={0.55} />
+      <Background gap={24} size={1.1} color="#dfe6ef" />
+      <Toolbar fullscreen={fullscreen} setFullscreen={setFullscreen} />
+      {showMiniMap && <MiniMap pannable zoomable position="bottom-right" nodeColor={node => (node.type === 'lane' ? 'transparent' : node.data?.highlight > 0 ? '#e11d48' : node.data?.role && !['directory', 'module_file'].includes(node.data.role) ? ROLE_COLORS[node.data.role] : node.data?.color || '#94a3b8')} nodeStrokeWidth={0} maskColor="rgba(16,35,62,.06)" className="!hidden !rounded-xl !border !border-slate-200 md:!block" />}
+      <FocusController ids={initialIds} positions={positions} minZoom={0.5} />
       <FocusController ids={focusIds} positions={positions} />
     </ReactFlow>
   </div>
+}
+
+export default function FlowGraph({ graph, height = 560, onNodeClick, onNodeDoubleClick, onPaneClick, selectedId = null, matchIds = null, focusIds = [], initialIds = [], showMiniMap = true }) {
+  // Each graph gets its own React Flow store, so several maps can live on one page.
+  return <ReactFlowProvider>
+    <FlowGraphInner graph={graph} height={height} onNodeClick={onNodeClick} onNodeDoubleClick={onNodeDoubleClick} onPaneClick={onPaneClick} selectedId={selectedId} matchIds={matchIds} focusIds={focusIds} initialIds={initialIds} showMiniMap={showMiniMap} />
+  </ReactFlowProvider>
 }
 
 export function Legend({ items }) {

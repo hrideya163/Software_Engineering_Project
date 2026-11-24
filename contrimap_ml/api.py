@@ -2,8 +2,8 @@
 
     uvicorn contrimap_ml.api:app --port 8001
 
-All model inference, repository analysis and recommendations are served here;
-the Express server (``server/``) keeps only GitHub/Google sign-in.
+All model inference, repository analysis, recommendations and GitHub/Google sign-in
+(``auth.py``) are served here.
 """
 
 from __future__ import annotations
@@ -21,9 +21,8 @@ from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
-load_dotenv(ROOT / "server" / ".env")
 
-from . import service  # noqa: E402  (environment must be loaded first)
+from . import auth, service  # noqa: E402  (environment must be loaded first)
 from .skills import as_public, skills_from_text  # noqa: E402
 
 NAME = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
@@ -31,6 +30,7 @@ NAME = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 app = FastAPI(title="ContriMap API", version="2.0.0")
 origins = [origin.strip() for origin in os.getenv("CONTRIMAP_ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if origin.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["GET", "POST"], allow_headers=["Content-Type"])
+app.include_router(auth.router)
 
 
 @app.exception_handler(service.GitHubError)
@@ -257,6 +257,8 @@ def recommendations(request: RecommendationRequest) -> dict[str, Any]:
 
     merged: list[dict[str, Any]] = []
     errors: dict[str, str] = {}
+    weights: dict[str, float] = {}
+    hidden = 0
     profile = _profile(request.profile)
 
     def rank_repository(full_name: str) -> dict[str, Any]:
@@ -272,11 +274,14 @@ def recommendations(request: RecommendationRequest) -> dict[str, Any]:
         except (service.GitHubError, HTTPException) as error:
             errors[full_name] = str(getattr(error, "detail", error))
             continue
+        weights = weights or result.get("weights") or {}
+        hidden += len(result.get("hidden") or [])
         merged.extend({**item, "repository": result["repository"]} for item in result["issues"])
     merged.sort(key=lambda item: -item["score"])
     for rank, item in enumerate(merged, 1):
         item["rank"] = rank
-    return {"issues": merged[: request.limit], "errors": errors, "mode": request.mode}
+    # Same profile and mode for every repository, so the weights are shared; the frontend uses them to explain scores.
+    return {"issues": merged[: request.limit], "errors": errors, "mode": request.mode, "weights": weights, "hidden": hidden, "searched": [name for name in dict.fromkeys(request.repositories) if name not in errors]}
 
 
 @app.post("/api/skills/extract")
