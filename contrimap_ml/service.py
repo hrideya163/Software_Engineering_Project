@@ -302,7 +302,6 @@ PREPARATION_STAGES = [
     ("imports", "Resolving imports and the technology stack"),
     ("graph", "Building the knowledge graph"),
     ("metrics", "Ranking core files and detecting modules"),
-    ("paths", "Indexing file paths for issue localization"),
     ("ready", "Ready"),
 ]
 _STAGE_INDEX = {name: index for index, (name, _) in enumerate(PREPARATION_STAGES)}
@@ -349,18 +348,32 @@ def repository_context(owner: str, repo: str) -> dict[str, Any]:
         if metrics is None:
             metrics = _jsonable(graph_metrics(graph))
             store.put("repository_metrics", metrics_key, metrics, repository=full.lower(), sha=snapshot["sha"])
-        # Embed every candidate path now, as part of preparation, instead of inside the first ranking request.
-        # Only paths never seen before are embedded (large repositories: ~350 paths per second on CPU).
-        from .localization import localization_candidates
-
-        candidates = localization_candidates(snapshot["files"])
-        _job_update(key, "paths", f"Indexing {len(candidates):,} file paths for issue localization")
-        with _PATH_LOCK:
-            PATH_CACHE.ensure(candidates)
         _job_update(key, "ready", state="ready", file_count=snapshot["file_count"], sha=snapshot["sha"])
+        # The overview, visualizer and file pages need only the snapshot and graph, so the repository is ready now.
+        # Path embeddings (needed only to rank and localize issues) are built in the background; ranking waits for
+        # them through _PATH_LOCK instead of every page waiting behind them.
+        _index_paths_in_background(full, snapshot["files"])
         return {"snapshot": snapshot, "graph": graph, "metrics": metrics}
 
     return CACHE.get_or_set(key, 900, load)
+
+
+def _index_paths_in_background(full: str, files: list[str]) -> None:
+    """Embed the repository's candidate paths once (only paths never seen before are embedded)."""
+
+    def run() -> None:
+        from .localization import localization_candidates
+
+        started = time.time()
+        try:
+            candidates = localization_candidates(files)
+            with _PATH_LOCK:
+                PATH_CACHE.ensure(candidates)
+            logger.info("Indexed %d paths of %s in %.1fs", len(candidates), full, time.time() - started)
+        except Exception:  # noqa: BLE001 - ranking indexes the paths itself if this failed
+            logger.exception("Background path indexing failed for %s", full)
+
+    threading.Thread(target=run, name=f"paths-{full}", daemon=True).start()
 
 
 GRAPH_VERSION = 1  # bump when graph_metrics changes

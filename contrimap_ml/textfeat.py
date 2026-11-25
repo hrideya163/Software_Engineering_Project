@@ -129,11 +129,80 @@ def handcrafted_features(title: str, body: str, labels: Iterable[str] = ()) -> d
 _MODEL_LOCK = threading.Lock()
 
 
+# Hub revision of all-MiniLM-L6-v2 whose ONNX export and tokenizer the ONNX embedder uses.
+ONNX_REVISION = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+
+
+class OnnxEmbedder:
+    """all-MiniLM-L6-v2 through ONNX Runtime: the same vectors as SentenceTransformer without loading PyTorch.
+
+    Mirrors the sentence-transformers pipeline (BERT tokenizer, 256-token truncation, mean pooling over the
+    attention mask, L2 normalisation). Uses about a third of the memory, which lets the API run on a 512 MB host.
+    """
+
+    max_seq_length = 256
+
+    def __init__(self, name: str = EMBEDDER_NAME, revision: str | None = ONNX_REVISION):
+        import onnxruntime as ort
+        from huggingface_hub import hf_hub_download
+        from tokenizers import Tokenizer
+
+        self.tokenizer = Tokenizer.from_file(hf_hub_download(name, "tokenizer.json", revision=revision))
+        self.tokenizer.enable_truncation(self.max_seq_length)
+        self.tokenizer.no_padding()
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = int(os.getenv("CONTRIMAP_ONNX_THREADS", "0"))
+        # The memory arena keeps the largest batch's buffers for the life of the process; off keeps the footprint flat.
+        options.enable_cpu_mem_arena = False
+        self.session = ort.InferenceSession(hf_hub_download(name, "onnx/model.onnx", revision=revision), options, providers=["CPUExecutionProvider"])
+        self.inputs = {item.name for item in self.session.get_inputs()}
+
+    def encode(self, texts: list[str], batch_size: int = 32, normalize_embeddings: bool = True, show_progress_bar: bool = False, **_: object) -> np.ndarray:
+        if not texts:
+            return np.zeros((0, 384), dtype="float32")
+        encodings = self.tokenizer.encode_batch([str(text).strip() for text in texts])  # sentence-transformers strips too
+        # Batch texts of similar length together so padding stays small (results do not depend on batching).
+        order = np.argsort([-len(item.ids) for item in encodings], kind="stable")
+        out = np.zeros((len(texts), 384), dtype="float32")
+        for start in range(0, len(order), batch_size):
+            chunk = order[start:start + batch_size]
+            width = max(len(encodings[i].ids) for i in chunk)
+            ids = np.zeros((len(chunk), width), dtype="int64")
+            mask = np.zeros_like(ids)
+            for row, i in enumerate(chunk):
+                n = len(encodings[i].ids)
+                ids[row, :n] = encodings[i].ids
+                mask[row, :n] = 1
+            feed = {"input_ids": ids, "attention_mask": mask}
+            if "token_type_ids" in self.inputs:
+                feed["token_type_ids"] = np.zeros_like(ids)
+            hidden = self.session.run(None, feed)[0]
+            weights = mask[..., None].astype("float32")
+            pooled = (hidden * weights).sum(axis=1) / np.clip(weights.sum(axis=1), 1e-9, None)
+            if normalize_embeddings:
+                pooled /= np.clip(np.linalg.norm(pooled, axis=1, keepdims=True), 1e-12, None)
+            out[chunk] = pooled
+        return out
+
+
+def _use_onnx() -> bool:
+    choice = os.getenv("CONTRIMAP_EMBEDDER", "auto").lower()
+    if choice in {"onnx", "torch"}:
+        return choice == "onnx"
+    try:
+        import onnxruntime  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def get_embedder(name: str = EMBEDDER_NAME):
     # Single-flight: the startup warm-up and the first requests must not each load the model (~12 s, CPU-bound).
     if name in _MODELS:
         return _MODELS[name]
     with _MODEL_LOCK:
+        if name not in _MODELS and name == EMBEDDER_NAME and _use_onnx():
+            _MODELS[name] = OnnxEmbedder(name)
         if name not in _MODELS:
             from sentence_transformers import SentenceTransformer
 
