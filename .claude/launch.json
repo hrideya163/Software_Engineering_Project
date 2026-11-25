@@ -1,0 +1,18 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "contrimap-api",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "uvicorn", "contrimap_ml.api:app", "--port", "8001"],
+      "port": 8001
+    },
+    {
+      "name": "contrimap-web",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["vite", "--port", "5173"],
+      "port": 5173,
+      "url": "http://localhost:5173"
+    }
+  ]
+}
