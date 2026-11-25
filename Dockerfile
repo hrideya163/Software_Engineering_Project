@@ -20,9 +20,9 @@ WORKDIR /app
 # The pip bundled with the base image cannot resolve uvicorn[standard] against the other pins.
 RUN pip install --no-cache-dir --upgrade pip
 # CPU-only torch keeps the image small; inference needs no GPU.
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
-COPY requirements-ml.txt ./
-RUN pip install --no-cache-dir -r requirements-ml.txt
+RUN pip install --no-cache-dir torch==2.15.0 --index-url https://download.pytorch.org/whl/cpu
+COPY requirements-ml.txt constraints-deploy.txt ./
+RUN pip install --no-cache-dir -r requirements-ml.txt -c constraints-deploy.txt
 # Pre-download the sentence embedder so containers start offline.
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
 COPY contrimap_ml ./contrimap_ml
@@ -32,6 +32,7 @@ COPY README.md data/processed/corpus.parquet* ./data/processed/
 COPY --from=frontend /app/dist ./dist
 ENV CONTRIMAP_SERVE_FRONTEND=1 CONTRIMAP_DEVICE=cpu PYTHONUNBUFFERED=1 HF_HUB_OFFLINE=1
 EXPOSE 8001
+# Hosts such as Render set PORT; locally the API listens on 8001.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8001/api/health', timeout=4).status == 200 else 1)"
-CMD ["uvicorn", "contrimap_ml.api:app", "--host", "0.0.0.0", "--port", "8001"]
+  CMD python -c "import os,urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:' + os.getenv('PORT', '8001') + '/api/health', timeout=4).status == 200 else 1)"
+CMD ["sh", "-c", "exec uvicorn contrimap_ml.api:app --host 0.0.0.0 --port ${PORT:-8001}"]
