@@ -197,7 +197,33 @@ def test_prepare_repository_reports_progress_until_ready(monkeypatch):
         time.sleep(0.02)
     assert service.preparation_status("acme", "widget")["state"] == "ready"
     assert service.repository_context("acme", "widget")["graph"] == "graph"
-    assert indexed == ["a.py", "b.py", "c.py"]  # path embeddings are prepared up front, not in the first ranking
+    # Path embeddings are built in the background after the repository is ready (pages do not wait for them).
+    while len(indexed) < 3 and time.time() < deadline:
+        time.sleep(0.02)
+    assert indexed == ["a.py", "b.py", "c.py"]
+
+
+def test_ready_does_not_wait_for_path_indexing(monkeypatch):
+    from contrimap_ml import service
+
+    release, started = threading.Event(), threading.Event()
+
+    def slow_ensure(self, paths):
+        started.set()
+        release.wait(5)
+
+    monkeypatch.setattr(service, "build_git_snapshot", lambda full, sha=None, progress=None: {"sha": "abc", "file_count": 1, "files": ["a.py"], "import_edges": [], "test_edges": [], "skills": [], "packages": []})
+    monkeypatch.setattr(service, "build_repository_graph", lambda snapshot: "graph")
+    monkeypatch.setattr(service, "graph_metrics", lambda graph: {"summary": {}, "pagerank": {}})
+    monkeypatch.setattr(service, "PATH_CACHE", type("SlowPaths", (), {"ensure": slow_ensure})())
+    service.CACHE._data.pop("context:acme/slow", None)
+    service._JOBS.pop("context:acme/slow", None)
+    try:
+        assert service.repository_context("acme", "slow")["graph"] == "graph"  # returns while indexing is still running
+        assert started.wait(5) and service.preparation_status("acme", "slow")["state"] == "ready"
+        assert service._PATH_LOCK.locked()  # ranking would wait here for the paths
+    finally:
+        release.set()
 
 
 class _Response:
