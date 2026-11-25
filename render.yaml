@@ -1,0 +1,33 @@
+# Render Blueprint for the ContriMap API (FastAPI + ML models), built from the Dockerfile.
+# The React frontend is deployed separately on Vercel (see vercel.json) and calls this service.
+# Secrets marked sync: false are entered in the Render dashboard when the Blueprint is created.
+services:
+  - type: web
+    name: contrimap-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # The models and sentence embedder need about 620 MB of RAM before any repository is analysed,
+    # so the 512 MB plans run out of memory. 1c-2g is the smallest plan that fits.
+    plan: 1c-2g
+    healthCheckPath: /api/health
+    envVars:
+      - key: CONTRIMAP_SERVE_FRONTEND
+        value: "0"
+      - key: CONTRIMAP_COOKIE_SECURE
+        value: "1"
+      - key: CONTRIMAP_ALLOWED_ORIGINS        # the Vercel URL, e.g. https://contrimap.vercel.app
+        sync: false
+      - key: CONTRIMAP_FRONTEND_URL           # same Vercel URL
+        sync: false
+      - key: CONTRIMAP_PUBLIC_API_URL         # this service's URL, e.g. https://contrimap-api.onrender.com
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: CONTRIMAP_SESSION_SECRET
+        generateValue: true

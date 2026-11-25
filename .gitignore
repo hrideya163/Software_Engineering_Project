@@ -1,8 +1,13 @@
 node_modules/
 dist/
 .env
-data/
-artifacts/
+data/*
+# The deployed API needs the resolved-issue corpus and the trained models; everything else under data/ and artifacts/ stays local.
+!data/processed/
+data/processed/*
+!data/processed/corpus.parquet
+artifacts/*
+!artifacts/v2/
 .venv-ml/
 *.log
 __pycache__/

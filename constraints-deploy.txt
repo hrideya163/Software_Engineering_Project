@@ -1,0 +1,10 @@
+# Versions the models in artifacts/v2 were trained and tested with (Python 3.11).
+# The Docker image installs with these so the pickled models load exactly as they do locally.
+scikit-learn==1.9.1
+lightgbm==4.7.0
+xgboost==3.2.0
+numpy==2.4.6
+pandas==3.1.1
+joblib==1.6.0
+scipy==1.17.1
+sentence-transformers==6.3.0

@@ -1,0 +1,972 @@
+{
+  "corpus": {
+    "records": 21347,
+    "repositories": 94,
+    "by_group": {
+      "dev": {
+        "records": 225,
+        "repositories": 6
+      },
+      "multilingual": {
+        "records": 300,
+        "repositories": 41
+      },
+      "test": {
+        "records": 2294,
+        "repositories": 12
+      },
+      "train": {
+        "records": 18528,
+        "repositories": 35
+      }
+    },
+    "languages": {
+      "Python": 20526,
+      "Unknown": 461,
+      "C": 102,
+      "Ruby": 44,
+      "Java": 43,
+      "Rust": 43,
+      "PHP": 43,
+      "Go": 40,
+      "JavaScript": 27,
+      "TypeScript": 17,
+      "C++": 1
+    }
+  },
+  "difficulty": {
+    "label_definition": "tertiles of log1p(LOC)+log1p(files) of non-test changes on train repositories",
+    "thresholds": [
+      3.091042453358316,
+      4.7535901911063645
+    ],
+    "grouped_cv_macro_f1": {
+      "0.0": 0.42292262726049973,
+      "0.3": 0.42775044681826285,
+      "0.5": 0.4265900351819221,
+      "0.7": 0.4252822504160634,
+      "1.0": 0.42013527930838884
+    },
+    "selected_linear_blend": 0.3,
+    "dev": {
+      "model": {
+        "n": 225,
+        "accuracy": 0.4488888888888889,
+        "macro_f1": 0.43878932696137,
+        "spearman_score_vs_true_scale": 0.5238863823954605,
+        "confusion_matrix": [
+          [
+            36,
+            16,
+            1
+          ],
+          [
+            44,
+            17,
+            11
+          ],
+          [
+            22,
+            30,
+            48
+          ]
+        ]
+      },
+      "size_regressor_spearman": 0.48084175625618547,
+      "size_regressor_mae": 1.259442341772841,
+      "size_baseline_mae_train_median": 1.4580737607100658,
+      "baselines": {
+        "majority_class": {
+          "accuracy": 0.32,
+          "macro_f1": 0.16161616161616163
+        },
+        "stratified_random": {
+          "accuracy": 0.4311111111111111,
+          "macro_f1": 0.41857162445397744
+        },
+        "body_length_tertiles": {
+          "accuracy": 0.29777777777777775,
+          "macro_f1": 0.2639292323615914
+        }
+      },
+      "repositories": 6
+    },
+    "test": {
+      "model": {
+        "n": 2294,
+        "accuracy": 0.4067131647776809,
+        "macro_f1": 0.40141323966056675,
+        "spearman_score_vs_true_scale": 0.2578395556667505,
+        "confusion_matrix": [
+          [
+            436,
+            315,
+            192
+          ],
+          [
+            340,
+            279,
+            299
+          ],
+          [
+            98,
+            117,
+            218
+          ]
+        ]
+      },
+      "size_regressor_spearman": 0.2310797683896947,
+      "size_regressor_mae": 1.1718497954072067,
+      "size_baseline_mae_train_median": 1.1896807926625803,
+      "baselines": {
+        "majority_class": {
+          "accuracy": 0.4001743679163034,
+          "macro_f1": 0.1905354919053549
+        },
+        "stratified_random": {
+          "accuracy": 0.3343504795117698,
+          "macro_f1": 0.32403167149006
+        },
+        "body_length_tertiles": {
+          "accuracy": 0.32083696599825634,
+          "macro_f1": 0.3095092999560127
+        }
+      },
+      "repositories": 12
+    },
+    "multilingual": {
+      "model": {
+        "n": 300,
+        "accuracy": 0.38666666666666666,
+        "macro_f1": 0.35322622295941475,
+        "spearman_score_vs_true_scale": 0.11150274194218021,
+        "confusion_matrix": [
+          [
+            59,
+            55,
+            15
+          ],
+          [
+            54,
+            46,
+            21
+          ],
+          [
+            16,
+            23,
+            11
+          ]
+        ]
+      },
+      "size_regressor_spearman": 0.04658569807808916,
+      "size_regressor_mae": 1.2430646593648567,
+      "size_baseline_mae_train_median": 1.236576655459502,
+      "baselines": {
+        "majority_class": {
+          "accuracy": 0.4033333333333333,
+          "macro_f1": 0.19160728424386383
+        },
+        "stratified_random": {
+          "accuracy": 0.32,
+          "macro_f1": 0.31448713106968335
+        },
+        "body_length_tertiles": {
+          "accuracy": 0.28,
+          "macro_f1": 0.25111859838274936
+        }
+      },
+      "repositories": 41
+    },
+    "effort": {
+      "n": 500,
+      "repositories": 12,
+      "evaluation": "5-fold repository-grouped CV on SWE-bench Verified human annotations",
+      "bucket_accuracy": 0.522,
+      "bucket_macro_f1": 0.3017176970272469,
+      "bucket_mae_levels": 0.484,
+      "spearman_expected_hours_vs_human": 0.11845994090615512,
+      "log_hours_mae": 0.6581500234583572,
+      "baseline_majority_bucket_accuracy": 0.522,
+      "baseline_majority_bucket_mae_levels": 0.478,
+      "baseline_majority_log_hours_mae": 0.6692403783473163,
+      "difficulty_score_spearman_vs_human": 0.16341507530901533,
+      "confusion_matrix": [
+        [
+          32,
+          162,
+          0
+        ],
+        [
+          32,
+          229,
+          0
+        ],
+        [
+          3,
+          42,
+          0
+        ]
+      ]
+    },
+    "structural": {
+      "train_issues": 3753,
+      "train_repositories": 35,
+      "grouped_cv_macro_f1": {
+        "text_stacker": 0.38634777510570406,
+        "text_plus_code_signals": 0.42588596488507485,
+        "text_model_oof": 0.4112226670081864
+      },
+      "selected": false,
+      "dev": {
+        "n": 225,
+        "text_only": {
+          "n": 225,
+          "accuracy": 0.4488888888888889,
+          "macro_f1": 0.43878932696137,
+          "spearman_score_vs_true_scale": 0.5238863823954605,
+          "confusion_matrix": [
+            [
+              36,
+              16,
+              1
+            ],
+            [
+              44,
+              17,
+              11
+            ],
+            [
+              22,
+              30,
+              48
+            ]
+          ]
+        },
+        "text_plus_code_signals": {
+          "n": 225,
+          "accuracy": 0.4488888888888889,
+          "macro_f1": 0.4154296704257365,
+          "spearman_score_vs_true_scale": 0.4903376459053921,
+          "confusion_matrix": [
+            [
+              44,
+              5,
+              4
+            ],
+            [
+              49,
+              10,
+              13
+            ],
+            [
+              40,
+              13,
+              47
+            ]
+          ]
+        }
+      },
+      "test": {
+        "n": 500,
+        "text_only": {
+          "n": 500,
+          "accuracy": 0.428,
+          "macro_f1": 0.36778181527772236,
+          "spearman_score_vs_true_scale": 0.19070145728674195,
+          "confusion_matrix": [
+            [
+              147,
+              99,
+              58
+            ],
+            [
+              67,
+              48,
+              47
+            ],
+            [
+              7,
+              8,
+              19
+            ]
+          ]
+        },
+        "text_plus_code_signals": {
+          "n": 500,
+          "accuracy": 0.41,
+          "macro_f1": 0.33846981142474064,
+          "spearman_score_vs_true_scale": 0.2068535019406842,
+          "confusion_matrix": [
+            [
+              136,
+              126,
+              42
+            ],
+            [
+              61,
+              59,
+              42
+            ],
+            [
+              10,
+              14,
+              10
+            ]
+          ]
+        },
+        "spearman_vs_human_time_to_fix": {
+          "text_only": 0.16341507530901533,
+          "text_plus_code_signals": 0.19204144157617517
+        }
+      },
+      "multilingual": {
+        "n": 300,
+        "text_only": {
+          "n": 300,
+          "accuracy": 0.38666666666666666,
+          "macro_f1": 0.35322622295941475,
+          "spearman_score_vs_true_scale": 0.11150274194218021,
+          "confusion_matrix": [
+            [
+              59,
+              55,
+              15
+            ],
+            [
+              54,
+              46,
+              21
+            ],
+            [
+              16,
+              23,
+              11
+            ]
+          ]
+        },
+        "text_plus_code_signals": {
+          "n": 300,
+          "accuracy": 0.4066666666666667,
+          "macro_f1": 0.3641960789870165,
+          "spearman_score_vs_true_scale": 0.19898957374954407,
+          "confusion_matrix": [
+            [
+              82,
+              26,
+              21
+            ],
+            [
+              71,
+              22,
+              28
+            ],
+            [
+              23,
+              9,
+              18
+            ]
+          ]
+        }
+      },
+      "selection_rule": "grouped-CV macro-F1 above both text baselines and dev macro-F1 above text-only",
+      "note": "Rule tightened after the first run: grouped CV alone selected the head; dev rejects it. Test numbers were not used for the decision."
+    },
+    "effort_structural": {
+      "n": 500,
+      "repositories": 12,
+      "evaluation": "5-fold repository-grouped CV on SWE-bench Verified human annotations (same folds for both variants)",
+      "text_only": {
+        "bucket_accuracy": 0.522,
+        "bucket_macro_f1": 0.3017176970272469,
+        "spearman_expected_hours_vs_human": 0.11845994090615512,
+        "log_loss": 0.9289655659932409
+      },
+      "text_plus_code_signals": {
+        "bucket_accuracy": 0.534,
+        "bucket_macro_f1": 0.33355970282621455,
+        "spearman_expected_hours_vs_human": 0.1292031394764386,
+        "log_loss": 0.9463318322281011
+      },
+      "baseline_majority_bucket_accuracy": 0.522,
+      "selected": false
+    }
+  },
+  "localization": {
+    "features": [
+      "emb_sim",
+      "emb_rel",
+      "emb_pct",
+      "bm25",
+      "bm25_rel",
+      "bm25_name",
+      "mention_path",
+      "mention_basename",
+      "mention_stem",
+      "stem_idf",
+      "mention_module",
+      "same_dir_as_mention",
+      "hist_seen",
+      "hist_freq",
+      "hist_recency",
+      "dir_hist",
+      "knn_sum",
+      "knn_max",
+      "depth",
+      "is_init",
+      "lang_match",
+      "is_doc",
+      "is_config",
+      "n_path_tokens"
+    ],
+    "dev": {
+      "model": {
+        "acc@1": 0.5111111111111111,
+        "acc@5": 0.7822222222222223,
+        "acc@10": 0.8666666666666667,
+        "mrr": 0.623763668430335,
+        "n": 225,
+        "oracle_candidate_coverage": 0.9911111111111112
+      },
+      "prefilter_coverage": 0.9822222222222222,
+      "median_candidates": 262.0
+    },
+    "test_verified_tree": {
+      "model": {
+        "acc@1": 0.506,
+        "acc@5": 0.75,
+        "acc@10": 0.836,
+        "mrr": 0.6152198412698412,
+        "n": 500,
+        "oracle_candidate_coverage": 1.0
+      },
+      "prefilter_coverage": 0.97,
+      "median_candidates": 1603.5,
+      "baseline_random": {
+        "acc@1": 0.0,
+        "acc@5": 0.012,
+        "acc@10": 0.02,
+        "mrr": 0.0038222222222222225,
+        "n": 500
+      },
+      "baseline_history_frequency": {
+        "acc@1": 0.064,
+        "acc@5": 0.216,
+        "acc@10": 0.312,
+        "mrr": 0.12852142857142865,
+        "n": 500
+      },
+      "baseline_bm25": {
+        "acc@1": 0.192,
+        "acc@5": 0.424,
+        "acc@10": 0.508,
+        "mrr": 0.2914238095238095,
+        "n": 500
+      },
+      "baseline_embedding": {
+        "acc@1": 0.246,
+        "acc@5": 0.454,
+        "acc@10": 0.578,
+        "mrr": 0.336423015873016,
+        "n": 500
+      },
+      "baseline_similar_issues_knn": {
+        "acc@1": 0.196,
+        "acc@5": 0.492,
+        "acc@10": 0.598,
+        "mrr": 0.3152182539682538,
+        "n": 500
+      },
+      "baseline_legacy_formula": {
+        "acc@1": 0.272,
+        "acc@5": 0.584,
+        "acc@10": 0.716,
+        "mrr": 0.40867380952380955,
+        "n": 500
+      }
+    },
+    "multilingual_tree": {
+      "model": {
+        "acc@1": 0.36333333333333334,
+        "acc@5": 0.64,
+        "acc@10": 0.7433333333333333,
+        "mrr": 0.48436375661375647,
+        "n": 300,
+        "oracle_candidate_coverage": 1.0
+      },
+      "prefilter_coverage": 0.9166666666666666,
+      "median_candidates": 685.0,
+      "baseline_random": {
+        "acc@1": 0.013333333333333334,
+        "acc@5": 0.043333333333333335,
+        "acc@10": 0.07333333333333333,
+        "mrr": 0.027652116402116404,
+        "n": 300
+      },
+      "baseline_history_frequency": {
+        "acc@1": 0.09666666666666666,
+        "acc@5": 0.21,
+        "acc@10": 0.24,
+        "mrr": 0.14160449735449737,
+        "n": 300
+      },
+      "baseline_bm25": {
+        "acc@1": 0.20666666666666667,
+        "acc@5": 0.43,
+        "acc@10": 0.5433333333333333,
+        "mrr": 0.3056613756613757,
+        "n": 300
+      },
+      "baseline_embedding": {
+        "acc@1": 0.16666666666666666,
+        "acc@5": 0.36,
+        "acc@10": 0.45,
+        "mrr": 0.24854761904761905,
+        "n": 300
+      },
+      "baseline_similar_issues_knn": {
+        "acc@1": 0.11,
+        "acc@5": 0.22666666666666666,
+        "acc@10": 0.24333333333333335,
+        "mrr": 0.15913227513227515,
+        "n": 300
+      },
+      "baseline_legacy_formula": {
+        "acc@1": 0.21333333333333335,
+        "acc@5": 0.42333333333333334,
+        "acc@10": 0.5266666666666666,
+        "mrr": 0.29773677248677266,
+        "n": 300
+      }
+    },
+    "feature_importance_gain": {
+      "bm25_rel": 0.2341,
+      "knn_sum": 0.2318,
+      "mention_path": 0.0953,
+      "lang_match": 0.088,
+      "knn_max": 0.0658,
+      "hist_recency": 0.0616,
+      "emb_pct": 0.0599,
+      "emb_rel": 0.0386,
+      "mention_stem": 0.0273,
+      "bm25_name": 0.0153,
+      "hist_freq": 0.015,
+      "mention_basename": 0.0149,
+      "stem_idf": 0.01,
+      "emb_sim": 0.0086,
+      "n_path_tokens": 0.007,
+      "dir_hist": 0.0063,
+      "same_dir_as_mention": 0.0051,
+      "bm25": 0.005,
+      "depth": 0.0034,
+      "is_doc": 0.0022,
+      "hist_seen": 0.0017,
+      "mention_module": 0.0016,
+      "is_config": 0.0007,
+      "is_init": 0.0005
+    },
+    "code_reranker": {
+      "depth": 50,
+      "features": [
+        "emb_sim",
+        "emb_rel",
+        "emb_pct",
+        "bm25",
+        "bm25_rel",
+        "bm25_name",
+        "mention_path",
+        "mention_basename",
+        "mention_stem",
+        "stem_idf",
+        "mention_module",
+        "same_dir_as_mention",
+        "hist_seen",
+        "hist_freq",
+        "hist_recency",
+        "dir_hist",
+        "knn_sum",
+        "knn_max",
+        "depth",
+        "is_init",
+        "lang_match",
+        "is_doc",
+        "is_config",
+        "n_path_tokens",
+        "stage1_score",
+        "stage1_gap",
+        "stage1_rank",
+        "code_def_hits",
+        "code_def_idf",
+        "code_ref_hits",
+        "code_string_hit",
+        "code_bm25",
+        "code_bm25_rel",
+        "code_def_bm25",
+        "code_lines",
+        "code_n_defs",
+        "code_missing"
+      ],
+      "train_groups": 3654,
+      "config_selection": [
+        {
+          "num_leaves": 15,
+          "min_child_samples": 40,
+          "learning_rate": 0.03,
+          "dev_mrr": 0.7235784832451501,
+          "best_iteration": 144
+        },
+        {
+          "num_leaves": 31,
+          "min_child_samples": 30,
+          "learning_rate": 0.03,
+          "dev_mrr": 0.733541446208113,
+          "best_iteration": 376
+        }
+      ],
+      "dev_stage1_mrr": 0.623763668430335,
+      "dev_stage2_mrr": 0.733541446208113,
+      "selected": true,
+      "dev": {
+        "model": {
+          "acc@1": 0.6266666666666667,
+          "acc@5": 0.8933333333333333,
+          "acc@10": 0.9244444444444444,
+          "mrr": 0.733541446208113,
+          "n": 225
+        },
+        "shortlist_coverage": 0.96,
+        "files_read_per_issue": 49.45777777777778
+      },
+      "test_verified_tree": {
+        "model": {
+          "acc@1": 0.62,
+          "acc@5": 0.87,
+          "acc@10": 0.914,
+          "mrr": 0.7246111111111108,
+          "n": 500
+        },
+        "shortlist_coverage": 0.952,
+        "files_read_per_issue": 49.964
+      },
+      "multilingual_tree": {
+        "model": {
+          "acc@1": 0.5233333333333333,
+          "acc@5": 0.7733333333333333,
+          "acc@10": 0.8366666666666667,
+          "mrr": 0.634015873015873,
+          "n": 300
+        },
+        "shortlist_coverage": 0.8833333333333333,
+        "files_read_per_issue": 49.89333333333333
+      },
+      "feature_importance_gain": {
+        "stage1_gap": 0.3815,
+        "code_bm25_rel": 0.214,
+        "stage1_rank": 0.1748,
+        "code_def_bm25": 0.0265,
+        "code_def_idf": 0.0194,
+        "code_bm25": 0.0179,
+        "stage1_score": 0.0178,
+        "code_lines": 0.0131,
+        "hist_freq": 0.013,
+        "code_n_defs": 0.0124,
+        "dir_hist": 0.0102,
+        "stem_idf": 0.01,
+        "emb_sim": 0.009,
+        "knn_max": 0.0088,
+        "emb_pct": 0.0086,
+        "knn_sum": 0.0077,
+        "hist_recency": 0.0075,
+        "emb_rel": 0.0071,
+        "bm25_rel": 0.0064,
+        "code_ref_hits": 0.0061,
+        "bm25": 0.0057,
+        "bm25_name": 0.0053,
+        "lang_match": 0.0033,
+        "n_path_tokens": 0.0028,
+        "depth": 0.0021,
+        "code_string_hit": 0.0021,
+        "mention_path": 0.0018,
+        "is_init": 0.0013,
+        "mention_basename": 0.0008,
+        "hist_seen": 0.0007,
+        "same_dir_as_mention": 0.0005,
+        "code_def_hits": 0.0005,
+        "mention_stem": 0.0004,
+        "mention_module": 0.0004,
+        "is_doc": 0.0003,
+        "is_config": 0.0003,
+        "code_missing": 0.0
+      },
+      "dev_nohist": {
+        "model": {
+          "acc@1": 0.6311111111111111,
+          "acc@5": 0.8088888888888889,
+          "acc@10": 0.8444444444444444,
+          "mrr": 0.7075343915343916,
+          "n": 225
+        }
+      },
+      "test_verified_nohist": {
+        "model": {
+          "acc@1": 0.588,
+          "acc@5": 0.832,
+          "acc@10": 0.884,
+          "mrr": 0.6915841269841267,
+          "n": 500
+        }
+      },
+      "multilingual_nohist": {
+        "model": {
+          "acc@1": 0.52,
+          "acc@5": 0.77,
+          "acc@10": 0.83,
+          "mrr": 0.6240158730158729,
+          "n": 300
+        }
+      }
+    },
+    "dev_nohist": {
+      "model": {
+        "acc@1": 0.5022222222222222,
+        "acc@5": 0.7244444444444444,
+        "acc@10": 0.7733333333333333,
+        "mrr": 0.5977389770723104,
+        "n": 225,
+        "oracle_candidate_coverage": 0.9911111111111112
+      }
+    },
+    "test_verified_nohist": {
+      "model": {
+        "acc@1": 0.424,
+        "acc@5": 0.622,
+        "acc@10": 0.712,
+        "mrr": 0.5104912698412697,
+        "n": 500,
+        "oracle_candidate_coverage": 1.0
+      }
+    },
+    "multilingual_nohist": {
+      "model": {
+        "acc@1": 0.3333333333333333,
+        "acc@5": 0.59,
+        "acc@10": 0.7066666666666667,
+        "mrr": 0.44665343915343914,
+        "n": 300,
+        "oracle_candidate_coverage": 1.0
+      }
+    },
+    "no_history_training_experiment": "Training stage 1 and 2 on no-history copies of every training issue did not improve dev MRR (0.728/0.696 vs 0.734/0.708 with/without history) and was not shipped."
+  },
+  "generated_at": "2026-11-14T21:42:00.691680+00:00",
+  "localization_comparison": {
+    "shipped (trained with history)": {
+      "dev": {
+        "stage1": {
+          "acc@1": 0.5111111111111111,
+          "acc@5": 0.7822222222222223,
+          "acc@10": 0.8666666666666667,
+          "mrr": 0.623763668430335,
+          "n": 225,
+          "oracle_candidate_coverage": 0.9911111111111112
+        },
+        "stage2": {
+          "acc@1": 0.6266666666666667,
+          "acc@5": 0.8933333333333333,
+          "acc@10": 0.9244444444444444,
+          "mrr": 0.733541446208113,
+          "n": 225
+        }
+      },
+      "test_verified_tree": {
+        "stage1": {
+          "acc@1": 0.506,
+          "acc@5": 0.75,
+          "acc@10": 0.836,
+          "mrr": 0.6152198412698412,
+          "n": 500,
+          "oracle_candidate_coverage": 1.0
+        },
+        "stage2": {
+          "acc@1": 0.62,
+          "acc@5": 0.87,
+          "acc@10": 0.914,
+          "mrr": 0.7246111111111108,
+          "n": 500
+        }
+      },
+      "multilingual_tree": {
+        "stage1": {
+          "acc@1": 0.36333333333333334,
+          "acc@5": 0.64,
+          "acc@10": 0.7433333333333333,
+          "mrr": 0.48436375661375647,
+          "n": 300,
+          "oracle_candidate_coverage": 1.0
+        },
+        "stage2": {
+          "acc@1": 0.5233333333333333,
+          "acc@5": 0.7733333333333333,
+          "acc@10": 0.8366666666666667,
+          "mrr": 0.634015873015873,
+          "n": 300
+        }
+      },
+      "dev_nohist": {
+        "stage1": {
+          "acc@1": 0.5022222222222222,
+          "acc@5": 0.7244444444444444,
+          "acc@10": 0.7733333333333333,
+          "mrr": 0.5977389770723104,
+          "n": 225,
+          "oracle_candidate_coverage": 0.9911111111111112
+        },
+        "stage2": {
+          "acc@1": 0.6311111111111111,
+          "acc@5": 0.8088888888888889,
+          "acc@10": 0.8444444444444444,
+          "mrr": 0.7075343915343916,
+          "n": 225
+        }
+      },
+      "test_verified_nohist": {
+        "stage1": {
+          "acc@1": 0.424,
+          "acc@5": 0.622,
+          "acc@10": 0.712,
+          "mrr": 0.5104912698412697,
+          "n": 500,
+          "oracle_candidate_coverage": 1.0
+        },
+        "stage2": {
+          "acc@1": 0.588,
+          "acc@5": 0.832,
+          "acc@10": 0.884,
+          "mrr": 0.6915841269841267,
+          "n": 500
+        }
+      },
+      "multilingual_nohist": {
+        "stage1": {
+          "acc@1": 0.3333333333333333,
+          "acc@5": 0.59,
+          "acc@10": 0.7066666666666667,
+          "mrr": 0.44665343915343914,
+          "n": 300,
+          "oracle_candidate_coverage": 1.0
+        },
+        "stage2": {
+          "acc@1": 0.52,
+          "acc@5": 0.77,
+          "acc@10": 0.83,
+          "mrr": 0.6240158730158729,
+          "n": 300
+        }
+      }
+    },
+    "experiment: + no-history training variants": {
+      "dev": {
+        "stage1": {
+          "acc@1": 0.5111111111111111,
+          "acc@5": 0.7866666666666666,
+          "acc@10": 0.8755555555555555,
+          "mrr": 0.6284479717813047,
+          "n": 225,
+          "oracle_candidate_coverage": 0.9911111111111112
+        },
+        "stage2": {
+          "acc@1": 0.6222222222222222,
+          "acc@5": 0.8933333333333333,
+          "acc@10": 0.9155555555555556,
+          "mrr": 0.7283015873015873,
+          "n": 225
+        }
+      },
+      "test_verified_tree": {
+        "stage1": {
+          "acc@1": 0.5,
+          "acc@5": 0.752,
+          "acc@10": 0.834,
+          "mrr": 0.6082595238095239,
+          "n": 500,
+          "oracle_candidate_coverage": 1.0
+        },
+        "stage2": {
+          "acc@1": 0.602,
+          "acc@5": 0.858,
+          "acc@10": 0.91,
+          "mrr": 0.709173809523809,
+          "n": 500
+        }
+      },
+      "multilingual_tree": {
+        "stage1": {
+          "acc@1": 0.35333333333333333,
+          "acc@5": 0.64,
+          "acc@10": 0.7533333333333333,
+          "mrr": 0.47470238095238093,
+          "n": 300,
+          "oracle_candidate_coverage": 1.0
+        },
+        "stage2": {
+          "acc@1": 0.5233333333333333,
+          "acc@5": 0.7766666666666666,
+          "acc@10": 0.84,
+          "mrr": 0.6323412698412699,
+          "n": 300
+        }
+      },
+      "dev_nohist": {
+        "stage1": {
+          "acc@1": 0.49777777777777776,
+          "acc@5": 0.7288888888888889,
+          "acc@10": 0.7733333333333333,
+          "mrr": 0.5952574955908287,
+          "n": 225,
+          "oracle_candidate_coverage": 0.9911111111111112
+        },
+        "stage2": {
+          "acc@1": 0.6133333333333333,
+          "acc@5": 0.8177777777777778,
+          "acc@10": 0.8488888888888889,
+          "mrr": 0.6962275132275132,
+          "n": 225
+        }
+      },
+      "test_verified_nohist": {
+        "stage1": {
+          "acc@1": 0.432,
+          "acc@5": 0.626,
+          "acc@10": 0.734,
+          "mrr": 0.5130888888888889,
+          "n": 500,
+          "oracle_candidate_coverage": 1.0
+        },
+        "stage2": {
+          "acc@1": 0.6,
+          "acc@5": 0.828,
+          "acc@10": 0.882,
+          "mrr": 0.694774603174603,
+          "n": 500
+        }
+      },
+      "multilingual_nohist": {
+        "stage1": {
+          "acc@1": 0.31666666666666665,
+          "acc@5": 0.6066666666666667,
+          "acc@10": 0.7133333333333334,
+          "mrr": 0.4406005291005291,
+          "n": 300,
+          "oracle_candidate_coverage": 1.0
+        },
+        "stage2": {
+          "acc@1": 0.5,
+          "acc@5": 0.7633333333333333,
+          "acc@10": 0.8233333333333334,
+          "mrr": 0.6120899470899472,
+          "n": 300
+        }
+      }
+    }
+  },
+  "data_note": "Reduced re-run on this machine: SWE-bench train/dev/test/Verified/Multilingual only (no next.js crawl, no GraphQL-ingested repositories), localization trained on a seeded sample of at most 120 issues per training repository."
+}
