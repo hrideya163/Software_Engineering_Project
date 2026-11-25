@@ -9,6 +9,7 @@ import hashlib
 import logging
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Iterable
 
@@ -125,19 +126,26 @@ def handcrafted_features(title: str, body: str, labels: Iterable[str] = ()) -> d
     }
 
 
+_MODEL_LOCK = threading.Lock()
+
+
 def get_embedder(name: str = EMBEDDER_NAME):
-    if name not in _MODELS:
-        from sentence_transformers import SentenceTransformer
+    # Single-flight: the startup warm-up and the first requests must not each load the model (~12 s, CPU-bound).
+    if name in _MODELS:
+        return _MODELS[name]
+    with _MODEL_LOCK:
+        if name not in _MODELS:
+            from sentence_transformers import SentenceTransformer
 
-        device = os.getenv("CONTRIMAP_DEVICE")
-        if device is None:
-            try:
-                import torch
+            device = os.getenv("CONTRIMAP_DEVICE")
+            if device is None:
+                try:
+                    import torch
 
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-            except ImportError:
-                device = "cpu"
-        _MODELS[name] = SentenceTransformer(name, device=device)
+                    device = "cuda" if torch.cuda.is_available() else "cpu"
+                except ImportError:
+                    device = "cpu"
+            _MODELS[name] = SentenceTransformer(name, device=device)
     return _MODELS[name]
 
 
@@ -160,3 +168,68 @@ def embed(texts: list[str], name: str = EMBEDDER_NAME, batch_size: int = 128, ca
 
 
 __all__ = ["EMBEDDER_NAME", "HANDCRAFTED_COLUMNS", "embed", "extract_mentions", "get_embedder", "handcrafted_features", "path_text", "path_tokens", "split_identifier", "text_tokens"]
+
+
+class VectorCache:
+    """Embeddings kept per text on local disk (SQLite), so file-path embeddings survive restarts and new commits.
+
+    A repository with 30,000+ files needs ~90 s of CPU to embed every path once; keyed by the whole path list
+    (the ``embed`` disk cache) that work was repeated after every restart or commit. Here each path text is stored
+    once, so later calls embed only paths that are new. Vectors are stored as float32 bytes per model.
+    """
+
+    def __init__(self, path: Path, name: str = EMBEDDER_NAME) -> None:
+        import sqlite3
+
+        self.path = path
+        self.name = name
+        self._lock = threading.Lock()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(path) as db:
+            db.execute("create table if not exists vectors (model text not null, text text not null, vector blob not null, primary key (model, text))")
+
+    def get_many(self, texts: list[str]) -> dict[str, np.ndarray]:
+        import sqlite3
+
+        found: dict[str, np.ndarray] = {}
+        with self._lock, sqlite3.connect(self.path) as db:
+            for start in range(0, len(texts), 900):
+                chunk = texts[start:start + 900]
+                rows = db.execute(f"select text, vector from vectors where model = ? and text in ({','.join('?' * len(chunk))})", [self.name, *chunk]).fetchall()
+                found.update({text: np.frombuffer(blob, dtype="float32") for text, blob in rows})
+        return found
+
+    def put_many(self, items: dict[str, np.ndarray]) -> None:
+        import sqlite3
+
+        with self._lock, sqlite3.connect(self.path) as db:
+            db.executemany("insert or replace into vectors (model, text, vector) values (?, ?, ?)", [(self.name, text, np.asarray(vector, dtype="float32").tobytes()) for text, vector in items.items()])
+
+
+_VECTOR_CACHE: "VectorCache | None" = None
+
+
+def embed_persistent(texts: list[str]) -> np.ndarray:
+    """Like ``embed`` but each distinct text is embedded at most once, ever (per model), using ``VectorCache``."""
+    global _VECTOR_CACHE
+    if not texts:
+        return np.zeros((0, 384), dtype="float32")
+    if _VECTOR_CACHE is None:
+        try:
+            _VECTOR_CACHE = VectorCache(Path(os.getenv("CONTRIMAP_VECTOR_CACHE", EMBED_CACHE.parent / "vector_cache.sqlite3")))
+        except Exception:  # noqa: BLE001 - without the cache this is plain ``embed``
+            return embed(texts, cache=False)
+    try:
+        known = _VECTOR_CACHE.get_many(sorted(set(texts)))
+    except Exception:  # noqa: BLE001
+        known = {}
+    missing = sorted({text for text in texts if text not in known})
+    if missing:
+        vectors = embed(missing, cache=False)
+        fresh = dict(zip(missing, vectors))
+        try:
+            _VECTOR_CACHE.put_many(fresh)
+        except Exception:  # noqa: BLE001
+            pass
+        known.update(fresh)
+    return np.asarray([known[text] for text in texts], dtype="float32")

@@ -8,7 +8,7 @@ ContriMap helps people find, understand and complete open-source contributions. 
 - **analyses an issue**: difficulty, effort, the files most likely to change (highlighted on the code graph and file tree), related tests, required skills, a step-by-step **contribution path**, and an LLM-written **explanation** grounded in those outputs;
 - builds **contributor profiles** from GitHub activity and recommends issues across several repositories, including **learning opportunities**.
 
-Every model is evaluated on repositories it never saw during training, against baselines - see [docs/EVALUATION.md](docs/EVALUATION.md) or the in-app *Model Card* page. [docs/EVALUATION_v2.2.md](docs/EVALUATION_v2.2.md) covers the v2.2 changes (code-reading localization, structural difficulty, no-history evaluation).
+Every model is evaluated on repositories it never saw during training, against baselines - see [docs/EVALUATION.md](docs/EVALUATION.md). [docs/EVALUATION_v2.2.md](docs/EVALUATION_v2.2.md) covers the v2.2 changes (code-reading localization, structural difficulty, no-history evaluation).
 
 ## Architecture
 
@@ -34,6 +34,18 @@ npm run dev                              # http://localhost:5173/ContriMap-websi
 ```
 
 Copy `.env.example` to `.env`. A valid `GITHUB_TOKEN` raises the GitHub API limit from 60 to 5,000 requests/hour (repository code itself is read with git and needs no token). `ANTHROPIC_API_KEY` enables Claude-written explanations (`ANTHROPIC_MODEL`, default `claude-opus-5-5`); without it a deterministic template is used.
+
+### Persistent storage (Supabase)
+
+Computed results are stored so they are reused across page loads and backend restarts: repository snapshots and graph metrics (per commit), issue predictions and analyses (per issue content, commit and model version), similar-issue results (6 hours), Claude explanations, contributor profiles and feedback. Keys contain the commit SHA, an issue-content hash and the model version, so a new commit, an edited issue or retrained models never serve stale results.
+
+1. Create a Supabase project and run both files in `supabase/migrations/` in order in its SQL editor (or `supabase db push`): the tables, then the grants that let the backend's secret key use them.
+2. Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in `.env` (backend only; row level security blocks browser keys).
+3. Optionally copy existing local data: `python scripts/migrate_to_store.py`.
+
+Without Supabase the same tables live in a local SQLite file (`data/contrimap_store.sqlite3`); if Supabase becomes unreachable the backend keeps working from memory and retries after a minute. `GET /api/health` reports the store and its hit counts.
+
+An LLM, Claude (`ANTHROPIC_API_KEY`) or Gemini (`GEMINI_API_KEY`, model `gemini-2.5-flash`), is used only to write an issue's summary and contribution guidance when the user presses *Explain with …* on an issue page; the result is stored and reused. Every other page, and every prediction, works without it.
 
 Sign-in is optional and served by the same API (`contrimap_ml/auth.py`). Set `GITHUB_OAUTH_CLIENT_ID`/`GITHUB_OAUTH_CLIENT_SECRET` and/or `GOOGLE_OAUTH_CLIENT_ID`/`GOOGLE_OAUTH_CLIENT_SECRET`, with callback URLs `http://localhost:8001/api/auth/github/callback` and `.../google/callback`. Sessions are HMAC-signed cookies (14 days) that survive server restarts; signing out revokes the session. Without credentials the *Sign in* button is hidden and everything works signed-out.
 

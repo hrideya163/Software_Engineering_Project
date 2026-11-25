@@ -13,7 +13,7 @@ const STEPS = [
 ]
 
 export default function HowItWorks() {
-  return <Page width="max-w-4xl" eyebrow="How it works" title="From a repository to a confident first pull request." description="ContriMap brings repository context, skill requirements, likely impact and practical next steps together, so choosing an issue feels less like guesswork. Every prediction is measured on repositories the models never saw; the Model Card lists the results.">
+  return <Page width="max-w-4xl" eyebrow="How it works" title="From a repository to a confident first pull request." description="ContriMap brings repository context, skill requirements, likely impact and practical next steps together, so choosing an issue feels less like guesswork. Every prediction is measured on repositories the models never saw.">
     <ol className="relative space-y-4 border-l-2 border-slate-200 pl-6">
       {STEPS.map(([Icon, title, text], index) => <li key={title} className="relative">
         <span className="absolute -left-[37px] top-5 grid h-6 w-6 place-items-center rounded-full bg-ink text-[11px] font-extrabold text-white">{index + 1}</span>
@@ -24,8 +24,8 @@ export default function HowItWorks() {
       </li>)}
     </ol>
     <div className="card mt-8 flex flex-col gap-4 p-6 sm:flex-row sm:items-center sm:justify-between">
-      <div className="flex gap-3"><Database size={20} className="mt-0.5 shrink-0 text-blue-700" /><p className="text-sm leading-6 text-slate-600">Predictions are guidance, not guarantees. Accuracy, baselines and limitations for every model are published on the Model Card.</p></div>
-      <div className="flex shrink-0 gap-2"><Link to="/model-card" className="btn-secondary">Model Card</Link><Link to="/#analyze" className="btn-primary">Try it <ArrowRight size={16} /></Link></div>
+      <div className="flex gap-3"><Database size={20} className="mt-0.5 shrink-0 text-blue-700" /><p className="text-sm leading-6 text-slate-600">Predictions are guidance, not guarantees: every model is evaluated on repositories it never saw, against simple baselines.</p></div>
+      <div className="flex shrink-0 gap-2"><Link to="/#analyze" className="btn-primary">Try it <ArrowRight size={16} /></Link></div>
     </div>
   </Page>
 }

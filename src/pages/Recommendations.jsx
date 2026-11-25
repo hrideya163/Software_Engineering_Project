@@ -120,7 +120,7 @@ export default function Recommendations() {
       setState(previous => ({ ...previous, loading: true, error: '' }))
       getRecommendations(profile, repositories, mode)
         .then(data => active && setState({ data, loading: false, error: '' }))
-        .catch(error => active && setState({ data: null, loading: false, error: error.message }))
+        .catch(error => active && setState(previous => ({ ...previous, loading: false, error: error.message })))
     }, 400)
     return () => { active = false; clearTimeout(timer) }
   }, [key]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -144,15 +144,15 @@ export default function Recommendations() {
           </button>)}
         </div>
 
-        {state.loading && <Loading compact label="Ranking open issues. Repositories analysed for the first time take up to a minute." />}
+        {state.loading && !data && <Loading compact label="Ranking open issues. Repositories analysed for the first time take up to a minute." />}
         {state.error && <ErrorMessage message={state.error} onRetry={() => setAttempt(value => value + 1)} />}
         {!repositories.length && <EmptyState message="Add a repository on the right to see recommendations." />}
-        {data && !state.loading && <>
+        {data && <div className={`space-y-5 transition-opacity ${state.loading ? 'pointer-events-none opacity-60' : ''}`} aria-busy={state.loading}>
           {errors.map(([name, message]) => <ErrorMessage key={name} title={name} message={message} />)}
-          <p className="text-sm font-semibold text-slate-500">{data.issues.length} issues from {data.searched?.length ?? repositories.length} {data.searched?.length === 1 ? 'repository' : 'repositories'}{data.hidden ? ` · ${data.hidden} hidden by you` : ''}</p>
+          <p className="text-sm font-semibold text-slate-500">{state.loading && <span className="mr-2 text-blue-700">Updating…</span>}{data.issues.length} issues from {data.searched?.length ?? repositories.length} {data.searched?.length === 1 ? 'repository' : 'repositories'}{data.hidden ? ` · ${data.hidden} hidden by you` : ''}</p>
           {!data.issues.length && !errors.length && <EmptyState message="No open issues found in these repositories." />}
           <div className="grid gap-4 md:grid-cols-2">{data.issues.map(item => <RankedIssueCard key={`${item.repository}#${item.issue.number}`} item={item} weights={data.weights} onFeedback={() => setFeedbackVersion(value => value + 1)} />)}</div>
-        </>}
+        </div>}
       </div>
 
       <aside className="space-y-5 lg:sticky lg:top-24 lg:self-start">

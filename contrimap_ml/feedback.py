@@ -1,6 +1,7 @@
 """Recommendation feedback: opened, saved, dismissed and completed issues per user.
 
-Stored as JSON lines under ``data/feedback`` (one line per event; the latest action per issue wins for state).
+Stored as an append-only event log in the store (Supabase ``feedback_events`` or the local SQLite fallback);
+the latest action per issue wins for state. JSON lines under ``data/feedback`` are only a fallback.
 Ranking uses it in two ways:
 * dismissed issues are hidden and completed ones are marked done;
 * a preference vector (mean embedding of saved/completed/opened issues minus dismissed ones) adds a
@@ -34,19 +35,11 @@ def _path(user: str) -> Path:
     return FEEDBACK_DIR / f"{user.lower()}.jsonl"
 
 
-def record(user: str, repository: str, number: int, action: str, title: str = "", text: str = "") -> dict[str, Any]:
-    if action not in ACTIONS:
-        raise ValueError(f"Unknown action {action!r}; expected one of {', '.join(ACTIONS)}.")
-    event = {"time": time.time(), "repository": repository.lower(), "number": int(number), "action": action, "title": title[:300], "text": text[:2000]}
-    path = _path(user)
-    with _LOCK:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event) + "\n")
-    return event
+_EVENT_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+EVENT_CACHE_SECONDS = 30
 
 
-def events(user: str) -> list[dict[str, Any]]:
+def _file_events(user: str) -> list[dict[str, Any]]:
     path = _path(user)
     if not path.exists():
         return []
@@ -59,6 +52,52 @@ def events(user: str) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             continue
     return out
+
+
+def _append_file(user: str, event: dict[str, Any]) -> None:
+    path = _path(user)
+    with _LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event) + "\n")
+
+
+def record(user: str, repository: str, number: int, action: str, title: str = "", text: str = "") -> dict[str, Any]:
+    """Append one event to the store (Supabase or SQLite); a local JSON-lines file is the fallback when it is down."""
+    from . import store
+
+    if action not in ACTIONS:
+        raise ValueError(f"Unknown action {action!r}; expected one of {', '.join(ACTIONS)}.")
+    _path(user)  # validates the id
+    event = {"time": time.time(), "repository": repository.lower(), "number": int(number), "action": action, "title": title[:300], "text": text[:2000]}
+    if not store.current().add_event({**event, "user_id": user.lower()}):
+        _append_file(user, event)
+    _EVENT_CACHE.pop(user.lower(), None)
+    return event
+
+
+def events(user: str) -> list[dict[str, Any]]:
+    """The user's events, oldest first. Events left in JSON-lines files (older versions, or written while the
+    store was down) are moved into the store the next time it is reachable."""
+    from . import store
+
+    _path(user)
+    key = user.lower()
+    cached = _EVENT_CACHE.get(key)
+    if cached and cached[0] > time.time():
+        return cached[1]
+    stored = store.current().events(key)
+    local = _file_events(user)
+    if stored is None:  # store unavailable: the local file is all we have
+        return local
+    if local:
+        moved = all(store.current().add_event({**event, "user_id": key}) for event in local)
+        if moved:
+            path = _path(user)
+            path.replace(path.with_suffix(".jsonl.migrated"))
+        stored = sorted(stored + local, key=lambda event: event["time"])
+    _EVENT_CACHE[key] = (time.time() + EVENT_CACHE_SECONDS, stored)
+    return stored
 
 
 def state(user: str, repository: str | None = None) -> dict[str, dict[str, Any]]:

@@ -24,8 +24,9 @@ from __future__ import annotations
 import bisect
 import logging
 import math
+import threading
 import re
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -63,9 +64,38 @@ def is_changelog(path: str) -> bool:
     return bool(CHANGELOG_PATH.search(path))
 
 
-def localization_candidates(files: Iterable[str]) -> list[str]:
-    """Files eligible as localization targets: valid, non-test, non-changelog source/doc/config files."""
+def _filter_candidates(files: Iterable[str]) -> list[str]:
     return [path for path in files if is_valid_candidate(path) and not is_test_path(path) and not is_changelog(path)]
+
+
+_CANDIDATE_CACHE: "OrderedDict[int, tuple[tuple[str, ...], list[str]]]" = OrderedDict()
+_STATIC_CACHE: "OrderedDict[tuple[int, str | None], tuple[tuple[str, ...], dict[str, Any]]]" = OrderedDict()
+_STATIC_LOCK = threading.Lock()
+
+
+def _remember(cache: OrderedDict, key: Any, value: Any, limit: int = 8) -> None:
+    with _STATIC_LOCK:
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > limit:
+            cache.popitem(last=False)
+
+
+def localization_candidates(files: Iterable[str]) -> list[str]:
+    """Files eligible as localization targets: valid, non-test, non-changelog source/doc/config files.
+
+    Pure function of the file list, so it is computed once per list (a repository snapshot) and reused for
+    every issue; with tens of thousands of files the filter alone took ~0.8 s per issue.
+    """
+    files = tuple(files)
+    key = hash(files)
+    with _STATIC_LOCK:
+        hit = _CANDIDATE_CACHE.get(key)
+    if hit is not None and hit[0] == files:
+        return list(hit[1])
+    result = _filter_candidates(files)
+    _remember(_CANDIDATE_CACHE, key, (files, result))
+    return list(result)
 
 
 # ---------------------------------------------------------------------------
@@ -144,29 +174,94 @@ class PathFeatureCache:
         return self.matrix[[self.index[path] for path in paths]]
 
 
-def _bm25(query: Counter[str], documents: list[list[str]]) -> np.ndarray:
-    n = len(documents)
-    scores = np.zeros(n, dtype="float32")
-    if not n or not query:
+class _BM25Index:
+    """Postings for a fixed document list, built once and queried per issue.
+
+    ``scores`` reproduces ``_bm25`` exactly: tokens are visited in the order their postings were first created
+    (first document containing them), and each document accumulates its terms in that same order.
+    """
+
+    def __init__(self, documents: Sequence[Sequence[str]]) -> None:
+        self.n = len(documents)
+        self.lengths = np.fromiter((len(doc) for doc in documents), dtype="float32", count=self.n)
+        self.average = (float(self.lengths.mean()) or 1.0) if self.n else 1.0
+        self.postings: dict[str, list[tuple[int, int]]] = {}
+        for doc_index, doc in enumerate(documents):
+            for token, tf in Counter(doc).items():
+                self.postings.setdefault(token, []).append((doc_index, tf))
+        self.order = {token: rank for rank, token in enumerate(self.postings)}
+
+    def scores(self, query: Counter[str]) -> np.ndarray:
+        scores = np.zeros(self.n, dtype="float32")
+        if not self.n or not query:
+            return scores
+        lengths, average, n = self.lengths, self.average, self.n
+        for token in sorted((token for token in query if token in self.postings), key=self.order.__getitem__):
+            hits = self.postings[token]
+            idf = math.log(1 + (n - len(hits) + 0.5) / (len(hits) + 0.5))
+            weight = idf * (1 + math.log(query[token]))
+            for doc_index, tf in hits:
+                scores[doc_index] += weight * tf * (_BM25_K1 + 1) / (tf + _BM25_K1 * (1 - _BM25_B + _BM25_B * lengths[doc_index] / average))
         return scores
-    postings: defaultdict[str, list[tuple[int, int]]] = defaultdict(list)
-    lengths = np.fromiter((len(doc) for doc in documents), dtype="float32", count=n)
-    average = float(lengths.mean()) or 1.0
-    for doc_index, doc in enumerate(documents):
-        for token, tf in Counter(doc).items():
-            if token in query:
-                postings[token].append((doc_index, tf))
-    for token, hits in postings.items():
-        idf = math.log(1 + (n - len(hits) + 0.5) / (len(hits) + 0.5))
-        weight = idf * (1 + math.log(query[token]))
-        for doc_index, tf in hits:
-            scores[doc_index] += weight * tf * (_BM25_K1 + 1) / (tf + _BM25_K1 * (1 - _BM25_B + _BM25_B * lengths[doc_index] / average))
-    return scores
+
+
+def _bm25(query: Counter[str], documents: list[list[str]]) -> np.ndarray:
+    return _BM25Index(documents).scores(query)
 
 
 def _module_key(path: str) -> str:
     key = re.sub(r"\.[A-Za-z0-9]+$", "", path)
     return key[: -len("/__init__")] if key.endswith("/__init__") else key
+
+
+def _static_features(candidates: list[str], cache: PathFeatureCache, repo_language: str | None) -> dict[str, Any]:
+    """Per-repository parts of the stage-1 features (path tokens, BM25 indexes, mention lookups, structure columns).
+
+    They depend only on the candidate list, so they are built once per snapshot instead of once per issue.
+    """
+    key_paths = tuple(candidates)
+    key = (hash(key_paths), repo_language)
+    with _STATIC_LOCK:
+        hit = _STATIC_CACHE.get(key)
+    if hit is not None and hit[0] == key_paths:
+        return hit[1]
+    n = len(candidates)
+    column = {name: index for index, name in enumerate(FEATURES)}
+    documents = [cache.tokens[path] for path in candidates]
+    by_basename: defaultdict[str, list[int]] = defaultdict(list)
+    by_suffix2: defaultdict[str, list[int]] = defaultdict(list)
+    by_module_suffix: defaultdict[str, list[int]] = defaultdict(list)
+    stems = []
+    for index, path in enumerate(candidates):
+        parts = path.split("/")
+        by_basename[parts[-1].lower()].append(index)
+        if len(parts) >= 2:
+            by_suffix2["/".join(parts[-2:])].append(index)
+        module_parts = _module_key(path).split("/")
+        for length in range(2, min(5, len(module_parts)) + 1):
+            by_module_suffix["/".join(module_parts[-length:])].append(index)
+        stems.append(PurePosixPath(parts[-1]).stem.lower())
+    stem_counts = Counter(stems)
+    structure = np.zeros((n, len(FEATURES)), dtype="float32")
+    for index, path in enumerate(candidates):
+        structure[index, column["depth"]] = path.count("/")
+        structure[index, column["is_init"]] = float(path.endswith("__init__.py") or path.rsplit("/", 1)[-1].startswith("index."))
+        structure[index, column["lang_match"]] = float(repo_language is not None and language_of(path) == repo_language)
+        structure[index, column["is_doc"]] = float(bool(DOC_PATH.search(path)))
+        structure[index, column["is_config"]] = float(bool(CONFIG_PATH.search(path)))
+        structure[index, column["n_path_tokens"]] = len(documents[index])
+        structure[index, column["stem_idf"]] = math.log(n / stem_counts[stems[index]])
+    static = {
+        "path_index": _BM25Index(documents),
+        "name_index": _BM25Index([path_tokens(path.rsplit("/", 1)[-1]) for path in candidates]),
+        "by_basename": by_basename, "by_suffix2": by_suffix2, "by_module_suffix": by_module_suffix,
+        "stems": stems, "basenames": [path.rsplit("/", 1)[-1].lower() for path in candidates],
+        "dirs": [path.rsplit("/", 1)[0] if "/" in path else None for path in candidates],
+        "structure": structure,
+        "structure_columns": [column[name] for name in ("depth", "is_init", "lang_match", "is_doc", "is_config", "n_path_tokens", "stem_idf")],
+    }
+    _remember(_STATIC_CACHE, key, (key_paths, static), limit=4)
+    return static
 
 
 def candidate_features(
@@ -184,6 +279,7 @@ def candidate_features(
         return matrix
     column = {name: index for index, name in enumerate(FEATURES)}
     cache.ensure(candidates)
+    static = _static_features(candidates, cache, repo_language)
 
     # Semantic.
     emb = cache.embeddings(candidates) @ np.asarray(query_embedding, dtype="float32")
@@ -193,30 +289,16 @@ def candidate_features(
 
     # Lexical.
     query = Counter(text_tokens(text))
-    documents = [cache.tokens[path] for path in candidates]
-    bm25 = _bm25(query, documents)
+    bm25 = static["path_index"].scores(query)
     matrix[:, column["bm25"]] = bm25
     matrix[:, column["bm25_rel"]] = bm25 / bm25.max() if bm25.max() > 0 else 0.0
-    matrix[:, column["bm25_name"]] = _bm25(query, [path_tokens(path.rsplit("/", 1)[-1]) for path in candidates])
+    matrix[:, column["bm25_name"]] = static["name_index"].scores(query)
 
     # Explicit mentions.
     mentions = extract_mentions(text)
     words = {word.lower() for word in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text)}
     basenames_mentioned = {PurePosixPath(path).name.lower() for path in mentions["paths"]}
-    by_basename: defaultdict[str, list[int]] = defaultdict(list)
-    by_suffix2: defaultdict[str, list[int]] = defaultdict(list)
-    by_module_suffix: defaultdict[str, list[int]] = defaultdict(list)
-    stems = []
-    for index, path in enumerate(candidates):
-        parts = path.split("/")
-        by_basename[parts[-1].lower()].append(index)
-        if len(parts) >= 2:
-            by_suffix2["/".join(parts[-2:])].append(index)
-        module_parts = _module_key(path).split("/")
-        for length in range(2, min(5, len(module_parts)) + 1):
-            by_module_suffix["/".join(module_parts[-length:])].append(index)
-        stems.append(PurePosixPath(parts[-1]).stem.lower())
-    stem_counts = Counter(stems)
+    by_basename, by_suffix2, by_module_suffix, stems = static["by_basename"], static["by_suffix2"], static["by_module_suffix"], static["stems"]
 
     for mentioned in mentions["paths"]:
         mentioned = mentioned.strip("/")
@@ -224,13 +306,16 @@ def candidate_features(
         hits = by_suffix2.get("/".join(parts[-2:]), []) if len(parts) >= 2 else by_basename.get(parts[-1].lower(), [])
         for index in hits:
             matrix[index, column["mention_path"]] = 1.0
-    for index, stem in enumerate(stems):
-        basename = candidates[index].rsplit("/", 1)[-1].lower()
-        if basename in basenames_mentioned:
-            matrix[index, column["mention_basename"]] = 1.0
-        if stem not in GENERIC_STEMS and len(stem) >= 4 and stem in words:
-            matrix[index, column["mention_stem"]] = 1.0
-        matrix[index, column["stem_idf"]] = math.log(n / stem_counts[stem])
+    basenames = static["basenames"]
+    if basenames_mentioned:
+        for index, basename in enumerate(basenames):
+            if basename in basenames_mentioned:
+                matrix[index, column["mention_basename"]] = 1.0
+    eligible = {stem for stem in words if stem not in GENERIC_STEMS and len(stem) >= 4}
+    if eligible:
+        for index, stem in enumerate(stems):
+            if stem in eligible:
+                matrix[index, column["mention_stem"]] = 1.0
     for dotted in mentions["dotted"]:
         parts = dotted.split(".")
         for start in range(len(parts)):
@@ -239,9 +324,10 @@ def candidate_features(
                     matrix[index, column["mention_module"]] = max(matrix[index, column["mention_module"]], float(end - start))
     strong = (matrix[:, column["mention_path"]] > 0) | (matrix[:, column["mention_module"]] >= 2)
     if strong.any():
-        mentioned_dirs = {candidates[index].rsplit("/", 1)[0] for index in np.flatnonzero(strong) if "/" in candidates[index]}
-        for index, path in enumerate(candidates):
-            if "/" in path and path.rsplit("/", 1)[0] in mentioned_dirs:
+        dirs = static["dirs"]
+        mentioned_dirs = {dirs[index] for index in np.flatnonzero(strong) if dirs[index] is not None}
+        for index, directory in enumerate(dirs):
+            if directory is not None and directory in mentioned_dirs:
                 matrix[index, column["same_dir_as_mention"]] = 1.0
 
     # History.
@@ -257,14 +343,9 @@ def candidate_features(
             matrix[index, column["knn_sum"]] = history["knn_sum"].get(path, 0.0)
             matrix[index, column["knn_max"]] = history["knn_max"].get(path, 0.0)
 
-    # Structure.
-    for index, path in enumerate(candidates):
-        matrix[index, column["depth"]] = path.count("/")
-        matrix[index, column["is_init"]] = float(path.endswith("__init__.py") or path.rsplit("/", 1)[-1].startswith("index."))
-        matrix[index, column["lang_match"]] = float(repo_language is not None and language_of(path) == repo_language)
-        matrix[index, column["is_doc"]] = float(bool(DOC_PATH.search(path)))
-        matrix[index, column["is_config"]] = float(bool(CONFIG_PATH.search(path)))
-        matrix[index, column["n_path_tokens"]] = len(documents[index])
+    # Structure (and stem rarity): precomputed per repository.
+    columns = static["structure_columns"]
+    matrix[:, columns] = static["structure"][:, columns]
     return matrix
 
 

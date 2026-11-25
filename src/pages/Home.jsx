@@ -58,7 +58,7 @@ export default function Home() {
           </div>)}</div>
           <div className="mt-8 flex flex-wrap items-center gap-3">
             <Link to="/recommendations" className="btn-primary"><Sparkles size={16} />Get issues picked for you</Link>
-            <Link to="/model-card" className="btn-secondary">See how accurate the models are</Link>
+            <Link to="/how-it-works" className="btn-secondary">How it works</Link>
           </div>
         </div>
       </section>

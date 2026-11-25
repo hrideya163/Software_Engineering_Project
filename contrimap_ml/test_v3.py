@@ -172,7 +172,7 @@ def test_prepare_repository_reports_progress_until_ready(monkeypatch):
 
     gate = threading.Event()
 
-    def fake_snapshot(full, progress=None):
+    def fake_snapshot(full, sha=None, progress=None):
         progress("contents", "Downloading 3 of 3 files")
         gate.wait(5)
         return {"sha": "abc", "file_count": 3, "files": ["a.py", "b.py", "c.py"], "import_edges": [], "test_edges": [], "skills": [], "packages": []}
@@ -180,6 +180,8 @@ def test_prepare_repository_reports_progress_until_ready(monkeypatch):
     monkeypatch.setattr(service, "build_git_snapshot", fake_snapshot)
     monkeypatch.setattr(service, "build_repository_graph", lambda snapshot: "graph")
     monkeypatch.setattr(service, "graph_metrics", lambda graph: {"summary": {}, "pagerank": {}})
+    indexed = []
+    monkeypatch.setattr(service, "PATH_CACHE", type("FakePaths", (), {"ensure": lambda self, paths: indexed.extend(paths)})())
     service.CACHE._data.pop("context:acme/widget", None)
     service._JOBS.pop("context:acme/widget", None)
     first = service.prepare_repository("acme", "widget")
@@ -195,6 +197,7 @@ def test_prepare_repository_reports_progress_until_ready(monkeypatch):
         time.sleep(0.02)
     assert service.preparation_status("acme", "widget")["state"] == "ready"
     assert service.repository_context("acme", "widget")["graph"] == "graph"
+    assert indexed == ["a.py", "b.py", "c.py"]  # path embeddings are prepared up front, not in the first ranking
 
 
 class _Response:

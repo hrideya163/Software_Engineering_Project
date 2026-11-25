@@ -37,7 +37,11 @@ Respond with a single JSON object and nothing else, with keys:
 "where_to_start" (list of up to 3 objects {"path": str, "reason": str}),
 "approach" (list of 3-6 short imperative steps),
 "risks" (list of up to 3 short strings),
-"learning_value" (1 sentence on what the reader would learn)."""
+"learning_value" (1 sentence on what the reader would learn),
+"contribution_guide" (one object per step of the provided contribution_path, same order, {"id": the step's id, "title": short imperative title specific to this issue, "detail": 1-3 sentences of concrete guidance for this step on this issue}). Keep every step id; refer only to the files, tests and commands listed for that step or in the context."""
+
+# Bump when the prompt or output format changes: stored explanations from an older prompt are not reused.
+PROMPT_VERSION = 2
 
 _cache: dict[str, dict[str, Any]] = {}
 
@@ -51,7 +55,7 @@ def _context(issue: Mapping[str, Any], analysis: Mapping[str, Any], profile: Map
         "candidate_files": [{"path": f["path"], "rank": f.get("rank"), "signals": f.get("signals", [])} for f in (analysis.get("files") or [])[:8]],
         "skills_required": [s.get("name") for s in (analysis.get("skills") or [])[:8]],
         "related_tests": analysis.get("related_tests", [])[:5],
-        "contribution_path": [step.get("title") for step in (analysis.get("contribution_path") or {}).get("steps", [])],
+        "contribution_path": [{key: step.get(key) for key in ("id", "title", "detail", "files", "commands") if step.get(key)} for step in (analysis.get("contribution_path") or {}).get("steps", [])],
         "reader": dict(profile) if profile else None,
     }
 
@@ -90,8 +94,54 @@ def _client():
     return anthropic.Anthropic()
 
 
+GEMINI_DEFAULT_MODEL = "gemini-2.5-flash"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+
+def provider() -> str | None:
+    """Which LLM writes explanations: ``LLM_PROVIDER`` if set, else Anthropic when its key is set, else Gemini."""
+    chosen = (os.getenv("LLM_PROVIDER") or "").lower()
+    has_anthropic = bool(os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN") or os.getenv("CONTRIMAP_FORCE_LLM"))
+    has_gemini = bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
+    if chosen in ("anthropic", "claude"):
+        return "anthropic" if has_anthropic else None
+    if chosen in ("gemini", "google"):
+        return "gemini" if has_gemini else None
+    return "anthropic" if has_anthropic else ("gemini" if has_gemini else None)
+
+
+def active_model() -> str | None:
+    """Model name used for explanations (part of the stored explanation key)."""
+    name = provider()
+    if name == "anthropic":
+        return os.getenv("ANTHROPIC_MODEL", DEFAULT_MODEL)
+    if name == "gemini":
+        return os.getenv("GEMINI_MODEL", GEMINI_DEFAULT_MODEL)
+    return None
+
+
 def _has_credentials() -> bool:
-    return bool(os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN") or os.getenv("CONTRIMAP_FORCE_LLM"))
+    return provider() is not None
+
+
+def _gemini_text(context: Mapping[str, Any], model: str) -> str:
+    """One generateContent call over HTTPS (the key stays on the server, sent as a header)."""
+    import requests
+
+    key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    body = {
+        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "contents": [{"role": "user", "parts": [{"text": json.dumps(context, default=str)}]}],
+        # Thinking is off: it would spend the output budget (cutting the JSON short) on a grounded rewrite task.
+        "generationConfig": {"responseMimeType": "application/json", "temperature": 0.3, "maxOutputTokens": 4096, "thinkingConfig": {"thinkingBudget": 0}},
+    }
+    response = requests.post(GEMINI_URL.format(model=model), json=body, headers={"x-goog-api-key": key}, timeout=45)
+    response.raise_for_status()
+    data = response.json()
+    candidates = data.get("candidates") or []
+    if not candidates or (candidates[0].get("finishReason") not in (None, "STOP", "MAX_TOKENS")):
+        raise RuntimeError(f"Gemini returned no usable answer ({(candidates[0].get('finishReason') if candidates else data.get('promptFeedback'))})")
+    return "".join(part.get("text", "") for part in (candidates[0].get("content") or {}).get("parts") or [])
 
 
 def _parse_json(text: str) -> dict[str, Any] | None:
@@ -111,10 +161,19 @@ def explain(issue: Mapping[str, Any], analysis: Mapping[str, Any], profile: Mapp
     if not _has_credentials():
         return fallback
     context = _context(issue, analysis, profile)
-    model = os.getenv("ANTHROPIC_MODEL", DEFAULT_MODEL)
+    model = active_model()
     key = hashlib.sha1((model + json.dumps(context, sort_keys=True, default=str)).encode()).hexdigest()
     if key in _cache:
         return _cache[key]
+    if provider() == "gemini":
+        try:
+            parsed = _parse_json(_gemini_text(context, model))
+        except Exception as error:  # network, auth, quota, safety block: the template is always a valid answer
+            logger.warning("Gemini explanation failed (%s); using template", type(error).__name__)
+            return fallback
+        if not parsed:
+            return fallback
+        return _finish(parsed, context, fallback, model, key)
     try:
         import anthropic
 
@@ -138,6 +197,27 @@ def explain(issue: Mapping[str, Any], analysis: Mapping[str, Any], profile: Mapp
     except Exception as error:  # network, auth, rate limit: the template is always a valid answer
         logger.warning("LLM explanation failed (%s); using template", type(error).__name__)
         return fallback
+    return _finish(parsed, context, fallback, model, key)
+
+
+def _guide_steps(parsed: Mapping[str, Any], context: Mapping[str, Any]) -> dict[str, dict[str, str]]:
+    """Rewritten title/detail per contribution-path step id; unknown ids and empty fields are dropped.
+
+    Files and commands are never taken from the model: the page keeps the ones detected in the repository.
+    """
+    known = {step.get("id") for step in context.get("contribution_path") or []}
+    steps: dict[str, dict[str, str]] = {}
+    for item in parsed.get("contribution_guide") or []:
+        if not isinstance(item, Mapping) or item.get("id") not in known:
+            continue
+        title, detail = str(item.get("title") or "").strip(), str(item.get("detail") or "").strip()
+        if title or detail:
+            steps[str(item["id"])] = {key: value[:600] for key, value in (("title", title[:120]), ("detail", detail)) if value}
+    return steps
+
+
+def _finish(parsed: Mapping[str, Any], context: Mapping[str, Any], fallback: Mapping[str, Any], model: str, key: str) -> dict[str, Any]:
+    """Validate the model's JSON: only candidate files may be referenced; missing fields come from the template."""
     allowed = {item["path"] for item in context["candidate_files"]}
     starts = [item for item in parsed.get("where_to_start") or [] if isinstance(item, Mapping) and item.get("path") in allowed][:3]
     result = {
@@ -149,9 +229,14 @@ def explain(issue: Mapping[str, Any], analysis: Mapping[str, Any], profile: Mapp
         "approach": [str(step) for step in (parsed.get("approach") or [])][:6] or fallback["approach"],
         "risks": [str(risk) for risk in (parsed.get("risks") or [])][:3],
         "learning_value": str(parsed.get("learning_value") or fallback["learning_value"]),
+        "guide_steps": _guide_steps(parsed, context),
     }
     _cache[key] = result
     return result
 
 
-__all__ = ["DEFAULT_MODEL", "explain", "template_explanation"]
+__all__ = ["DEFAULT_MODEL", "PROMPT_VERSION", "active_model", "explain", "explain_with_llm", "provider", "template_explanation"]
+
+
+# The single entry point that may call an LLM (used by service.explanation when the user asks for it).
+explain_with_llm = explain

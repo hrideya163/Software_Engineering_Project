@@ -24,6 +24,7 @@
 | | `feedback.py` | Recommendation feedback (opened / saved / dismissed / completed) as JSON lines per user; a preference vector from engaged issues feeds a `feedback` ranking component. |
 | Serving | `service.py` | Single-flight TTL cache, background repository preparation with progress, GitHub access with ETag conditional requests (falls back to anonymous on a bad token, serves stale data when rate-limited), model orchestration. |
 | | `api.py` | FastAPI routes (also serves the built frontend in Docker). |
+| | `store.py` | Persistent store: Supabase (PostgREST over HTTPS, service-role key) or local SQLite, behind a small in-memory LRU. Versioned keys (commit SHA, issue-content hash, model version, LLM model, profile hash); a one-minute cool-down keeps the app working when the database is down. Schema in `supabase/migrations/`. |
 | | `auth.py` | Optional GitHub / Google sign-in: OAuth with a signed state cookie, stateless HMAC-signed session cookies (survive restarts), revocation on sign-out, open-redirect-safe return paths. |
 | Training | `train_v2.py`, `recommendation_eval.py`, `report.py`, `compare_localization.py` | End-to-end training, evaluation and report rendering; side-by-side comparison of saved localization models on cached splits (with and without history). |
 | Legacy | `models.py`, `features.py`, `inference.py`, … | v1 pipeline kept for reproducibility of the original baseline. |
@@ -70,3 +71,19 @@
 - `CONTRIMAP_PROFILE_PR_FILES` (default 8) - how many merged PRs per contributor profile have their changed files fetched (skipped when the anonymous GitHub quota is low).
 - `/api/health` reports the remaining GitHub quota, whether models loaded and whether code reading is on; the Docker image has a `HEALTHCHECK` on it.
 - CI (`.github/workflows/ci.yml`): Python tests, frontend build, and a Docker build that starts the container and checks `/api/health` and the served frontend.
+
+## Caching and persistence
+
+| Data | Key (what invalidates it) | Where |
+|---|---|---|
+| Default-branch commit | repository; 10-minute expiry | store |
+| Snapshot | repository + commit + snapshot version | store (and the on-disk git cache) |
+| Graph metrics | repository + commit + graph version | store; the graph itself is rebuilt from the snapshot (< 0.3 s) |
+| Issue predictions (embedding, top files, difficulty, effort, readiness) | repository + issue number + issue-content hash + commit + model version | store |
+| Issue analysis | the same + profile hash | store |
+| Similar issues and PR files | repository + issue number + issue-content hash; 6-hour expiry | store |
+| Claude explanation | analysis key + LLM model | store (only real Claude output) |
+| Profiles, feedback | user id | store (feedback is an append-only event log) |
+| GitHub metadata, issue lists, activity | 5-30 minutes | memory only (ETag-revalidated) |
+
+Model version = hash of the artifact files plus `INFERENCE_VERSION`. Ranked lists are computed once per repository for 40 (or 60) issues and sliced for smaller pages; only new or edited issues are re-predicted. `scripts/profile_api.py` times the page request sequence; `scripts/profile_service.py` breaks one ranking into its parts.

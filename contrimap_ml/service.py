@@ -28,12 +28,12 @@ import requests
 from .codegraph import architecture_view, build_repository_graph, file_tree, graph_metrics, impact_radius, issue_view
 from .guidance import UserProfile, contribution_path, personal_components, personal_weights
 from .issue_ranking import DEFAULT_WEIGHTS, rank_issues
-from .llm import explain
+
 from .localization import LocalizationModel, PathFeatureCache, RepoHistory
 from .recommendation import ContributorProfile, infer_level
 from .skills import as_public, combine, extract_issue_skills, skills_from_text
 from .snapshot import build_git_snapshot
-from .textfeat import embed
+from .textfeat import embed, embed_persistent
 
 logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parent.parent
@@ -179,8 +179,17 @@ class Models:
     report: dict[str, Any]
 
 
-@lru_cache(maxsize=1)
+_MODELS_LOCK = threading.Lock()
+
+
 def models() -> Models:
+    """The trained artifacts, loaded once (single-flight: warm-up and early requests share one load)."""
+    with _MODELS_LOCK:
+        return _load_models()
+
+
+@lru_cache(maxsize=1)
+def _load_models() -> Models:
     import json
 
     report_path = ARTIFACTS / "evaluation_report.json"
@@ -193,7 +202,26 @@ def models() -> Models:
     )
 
 
-PATH_CACHE = PathFeatureCache(embed)
+@lru_cache(maxsize=1)
+def model_version() -> str:
+    """Identifies the trained artifacts plus the inference code that uses them; part of every cached prediction key.
+
+    Retraining (new artifact files) or bumping INFERENCE_VERSION invalidates stored predictions and analyses.
+    """
+    import hashlib
+
+    digest = hashlib.sha1(INFERENCE_VERSION.encode())
+    for path in sorted(ARTIFACTS.glob("*.joblib")) + sorted(ARTIFACTS.glob("*.json")):
+        stat = path.stat()
+        digest.update(f"{path.name}:{stat.st_size}:{int(stat.st_mtime)}".encode())
+    return digest.hexdigest()[:12]
+
+
+INFERENCE_VERSION = "2026.11.25"
+
+
+# Path embeddings are stored per path on disk, so restarts and new commits only embed paths that are new.
+PATH_CACHE = PathFeatureCache(embed_persistent)
 _PATH_LOCK = threading.Lock()
 
 
@@ -234,8 +262,12 @@ def repo_history(repo: str) -> RepoHistory | None:
 # ---------------------------------------------------------------------------
 def _repo_meta(owner: str, repo: str) -> dict[str, Any]:
     def load() -> dict[str, Any]:
-        data = github().get(f"/repos/{owner}/{repo}")
-        languages = github().get(f"/repos/{owner}/{repo}/languages")
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=2) as pool:  # independent requests
+            data_future = pool.submit(github().get, f"/repos/{owner}/{repo}")
+            languages_future = pool.submit(github().get, f"/repos/{owner}/{repo}/languages")
+            data, languages = data_future.result(), languages_future.result()
         return {
             "available": True,
             "full_name": data["full_name"],
@@ -270,6 +302,7 @@ PREPARATION_STAGES = [
     ("imports", "Resolving imports and the technology stack"),
     ("graph", "Building the knowledge graph"),
     ("metrics", "Ranking core files and detecting modules"),
+    ("paths", "Indexing file paths for issue localization"),
     ("ready", "Ready"),
 ]
 _STAGE_INDEX = {name: index for index, (name, _) in enumerate(PREPARATION_STAGES)}
@@ -290,21 +323,54 @@ def repository_context(owner: str, repo: str) -> dict[str, Any]:
     key = f"context:{full}".lower()
 
     def load() -> dict[str, Any]:
+        from . import store
+        from .snapshot import SNAPSHOT_VERSION
+
         _job_update(key, "tree", started_at=time.time(), state="running", error=None)
-        try:
-            snapshot = build_git_snapshot(full, progress=lambda stage, message: _job_update(key, stage, message))
-        except Exception as error:
-            failure = GitHubError(f"Could not fetch {full} with git: {error}", 404 if "not found" in str(error).lower() or "could not read" in str(error).lower() else 502)
-            _job_update(key, "error", str(failure), state="error", error=str(failure))
-            raise failure from error
+        # The default branch's commit is remembered for 10 minutes (also across restarts), so a fresh process
+        # can load the stored snapshot without first asking GitHub for the latest commit.
+        head = (store.get("repository_heads", full.lower()) or {}).get("sha")
+        snapshot = store.get("repository_snapshots", f"{full.lower()}@{head}:v{SNAPSHOT_VERSION}") if head else None
+        if snapshot is None:
+            try:
+                snapshot = build_git_snapshot(full, sha=head, progress=lambda stage, message: _job_update(key, stage, message))
+            except Exception as error:
+                failure = GitHubError(f"Could not fetch {full} with git: {error}", 404 if "not found" in str(error).lower() or "could not read" in str(error).lower() else 502)
+                _job_update(key, "error", str(failure), state="error", error=str(failure))
+                raise failure from error
+            store.put("repository_snapshots", f"{full.lower()}@{snapshot['sha']}:v{SNAPSHOT_VERSION}", snapshot, repository=full.lower(), sha=snapshot["sha"])
+        if head != snapshot["sha"]:
+            store.put("repository_heads", full.lower(), {"sha": snapshot["sha"]}, repository=full.lower(), sha=snapshot["sha"])
         _job_update(key, "graph", f"Building the knowledge graph ({snapshot['file_count']:,} files)")
         graph = build_repository_graph(snapshot)
         _job_update(key, "metrics")
-        metrics = graph_metrics(graph)
+        metrics_key = f"{full.lower()}@{snapshot['sha']}:g{GRAPH_VERSION}"
+        metrics = store.get("repository_metrics", metrics_key)
+        if metrics is None:
+            metrics = _jsonable(graph_metrics(graph))
+            store.put("repository_metrics", metrics_key, metrics, repository=full.lower(), sha=snapshot["sha"])
+        # Embed every candidate path now, as part of preparation, instead of inside the first ranking request.
+        # Only paths never seen before are embedded (large repositories: ~350 paths per second on CPU).
+        from .localization import localization_candidates
+
+        candidates = localization_candidates(snapshot["files"])
+        _job_update(key, "paths", f"Indexing {len(candidates):,} file paths for issue localization")
+        with _PATH_LOCK:
+            PATH_CACHE.ensure(candidates)
         _job_update(key, "ready", state="ready", file_count=snapshot["file_count"], sha=snapshot["sha"])
         return {"snapshot": snapshot, "graph": graph, "metrics": metrics}
 
     return CACHE.get_or_set(key, 900, load)
+
+
+GRAPH_VERSION = 1  # bump when graph_metrics changes
+
+
+def _jsonable(value: Any) -> Any:
+    """Round-trip through JSON so fresh and stored results have identical types (lists, string keys)."""
+    import json
+
+    return json.loads(json.dumps(value, default=lambda item: sorted(item) if isinstance(item, (set, frozenset)) else str(item)))
 
 
 def preparation_status(owner: str, repo: str) -> dict[str, Any]:
@@ -396,16 +462,17 @@ def _map_issue(issue: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def list_issues(owner: str, repo: str, limit: int = 40) -> list[dict[str, Any]]:
+    """Most recently updated open issues; one GitHub request serves every page size (cached 5 minutes)."""
     def load() -> list[dict[str, Any]]:
         # The issues endpoint also returns pull requests; fetch a full page so filtering them out leaves enough issues.
         raw = github().get(f"/repos/{owner}/{repo}/issues", state="open", per_page=100, sort="updated", direction="desc")
-        return [_map_issue(item) for item in raw if "pull_request" not in item][:limit]
+        return [_map_issue(item) for item in raw if "pull_request" not in item]
 
-    return CACHE.get_or_set(f"issues:{owner}/{repo}:{limit}".lower(), 300, load)
+    return CACHE.get_or_set(f"issues:{owner}/{repo}".lower(), 300, load)[:limit]
 
 
 def get_issue(owner: str, repo: str, number: int) -> dict[str, Any]:
-    for issue in CACHE.peek(f"issues:{owner}/{repo}:40".lower()) or []:
+    for issue in CACHE.peek(f"issues:{owner}/{repo}".lower()) or []:
         if issue["number"] == number:
             return issue
     return CACHE.get_or_set(f"issue:{owner}/{repo}#{number}".lower(), 300, lambda: _map_issue(github().get(f"/repos/{owner}/{repo}/issues/{number}")))
@@ -423,23 +490,16 @@ def _localize_many(full: str, context: Mapping[str, Any], issues: Sequence[Mappi
     history = repo_history(full)
     with _PATH_LOCK:
         states = [model.shortlist(issue["title"], issue.get("body") or "", snapshot["files"], query, PATH_CACHE, history, _repo_languages().get(full)) for issue, query in zip(issues, queries)]
-    download = True
-    if READ_CODE:
+    # Shortlists overlap heavily, so all of their files are downloaded and read in one pass.
+    every_path = sorted({path for state in states for path in state.paths})
+    all_contents: Mapping[str, str] = {}
+    if READ_CODE and every_path:
         try:
-            prefetch_blobs(full, [(snapshot["sha"], state.paths) for state in states if state.paths])
-            download = False
-        except Exception as error:  # fall back to per-issue reads (or stage 1 if those fail too)
-            logger.warning("Could not prefetch shortlist code for %s: %s", full, error)
-    results = []
-    for state in states:
-        contents: Mapping[str, str] = {}
-        if READ_CODE and state.paths:
-            try:
-                contents = fetch_blobs(full, snapshot["sha"], state.paths, download=download)
-            except Exception as error:
-                logger.warning("Could not read shortlist code for %s: %s", full, error)
-        results.append(model.finish(state, contents, top_k, with_signals=True))
-    return results
+            prefetch_blobs(full, [(snapshot["sha"], every_path)])
+            all_contents = fetch_blobs(full, snapshot["sha"], every_path, download=False)
+        except Exception as error:  # fall back to stage 1 (paths, text, history) for these issues
+            logger.warning("Could not read shortlist code for %s: %s", full, error)
+    return [model.finish(state, {path: all_contents[path] for path in state.paths if path in all_contents}, top_k, with_signals=True) for state in states]
 
 
 def _localize(full: str, context: Mapping[str, Any], issue: Mapping[str, Any], query: np.ndarray, top_k: int = 10) -> tuple[list[dict[str, Any]], dict[str, float]]:
@@ -487,10 +547,107 @@ def _result_key(kind: str, owner: str, repo: str, *parts: Any) -> str:
     return f"{kind}:{owner}/{repo}:{digest}".lower()
 
 
+def _profile_hash(profile_data: Mapping[str, Any] | None) -> str:
+    import hashlib
+    import json
+
+    return hashlib.sha1(json.dumps(profile_data, sort_keys=True, default=str).encode()).hexdigest()[:12] if profile_data else "anonymous"
+
+
+def _analysis_key(owner: str, repo: str, issue: Mapping[str, Any], profile_data: Mapping[str, Any] | None) -> str:
+    sha = repository_context(owner, repo)["snapshot"]["sha"]
+    number = issue.get("number") if issue.get("number") is not None else "draft"
+    return f"{owner}/{repo}".lower() + f"#{number}:{issue_version(issue)}:{sha}:{model_version()}:{_profile_hash(profile_data)}"
+
+
 def analyze_issue(owner: str, repo: str, issue: Mapping[str, Any], profile_data: Mapping[str, Any] | None = None, with_explanation: bool = True) -> dict[str, Any]:
-    """Full analysis; cached for 10 minutes per (issue text and update time, profile, explanation flag)."""
-    key = _result_key("analysis", owner, repo, issue.get("number"), issue.get("title"), issue.get("body"), issue.get("labels"), issue.get("updated_at"), profile_data, with_explanation)
-    return CACHE.get_or_set(key, 600, lambda: _analyze_issue(owner, repo, issue, profile_data, with_explanation))
+    """Full analysis, stored per (issue content, commit, model version, profile) so restarts reuse it.
+
+    Never calls the LLM: the explanation attached here is a stored Claude explanation when one was generated
+    earlier for exactly this analysis, otherwise the deterministic template (see ``explanation``).
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from . import store
+
+    key = _analysis_key(owner, repo, issue, profile_data)
+
+    def load() -> dict[str, Any]:
+        stored = store.get("issue_analyses", key)
+        if stored is not None:
+            return stored
+        result = _jsonable(_analyze_issue(owner, repo, issue, profile_data, with_explanation=False))
+        store.put("issue_analyses", key, result, repository=f"{owner}/{repo}".lower(), sha=result["sha"], model_version=model_version())
+        return result
+
+    if not with_explanation:
+        return dict(CACHE.get_or_set(f"analysis:{key}", 600, load))
+    # The stored-explanation lookup does not depend on the analysis: run both lookups at the same time.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        stored_explanation = pool.submit(store.get, "explanations", _explanation_key(owner, repo, issue, profile_data))
+        analysis = dict(CACHE.get_or_set(f"analysis:{key}", 600, load))
+        explanation_value = stored_explanation.result()
+    if explanation_value is None:
+        from .llm import template_explanation
+
+        explanation_value = template_explanation(issue, analysis, UserProfile.from_dict(profile_data).to_public() if profile_data else None)
+    analysis["explanation"] = explanation_value
+    analysis["llm_available"] = llm_available()
+    analysis["llm_provider"] = _llm_label()
+    return analysis
+
+
+def _llm_label() -> str | None:
+    from .llm import provider
+
+    return {"anthropic": "Claude", "gemini": "Gemini"}.get(provider() or "")
+
+
+def llm_available() -> bool:
+    from .llm import _has_credentials
+
+    return _has_credentials()
+
+
+def _explanation_key(owner: str, repo: str, issue: Mapping[str, Any], profile_data: Mapping[str, Any] | None) -> str:
+    from .llm import PROMPT_VERSION, active_model
+
+    return f"{_analysis_key(owner, repo, issue, profile_data)}:{active_model() or 'template'}:p{PROMPT_VERSION}"
+
+
+def _stored_or_template_explanation(owner: str, repo: str, issue: Mapping[str, Any], analysis: Mapping[str, Any], profile_data: Mapping[str, Any] | None) -> dict[str, Any]:
+    from . import store
+    from .llm import template_explanation
+
+    stored = store.get("explanations", _explanation_key(owner, repo, issue, profile_data))
+    if stored is not None:
+        return stored
+    profile = UserProfile.from_dict(profile_data).to_public() if profile_data else None
+    return template_explanation(issue, analysis, profile)
+
+
+def explanation(owner: str, repo: str, issue: Mapping[str, Any], profile_data: Mapping[str, Any] | None = None, generate: bool = False) -> dict[str, Any]:
+    """The issue explanation and contribution guidance.
+
+    The only place Claude is called, and only when ``generate`` is set (the user asked for it) and an API key is
+    configured. The result is stored per analysis and LLM model, so later page loads read it back instead of
+    calling the API again. Without a key, or if the call fails, the deterministic template is returned.
+    """
+    from . import store
+    from .llm import explain_with_llm
+
+    analysis = analyze_issue(owner, repo, issue, profile_data, with_explanation=False)
+    key = _explanation_key(owner, repo, issue, profile_data)
+    current = _stored_or_template_explanation(owner, repo, issue, analysis, profile_data)
+    if current.get("source") != "llm" and generate and llm_available():
+        def create() -> dict[str, Any]:
+            profile = UserProfile.from_dict(profile_data).to_public() if profile_data else None
+            result = explain_with_llm(issue, analysis, profile)
+            if result.get("source") == "llm":  # only real Claude output is stored; templates are free to rebuild
+                store.put("explanations", key, result, repository=f"{owner}/{repo}".lower(), sha=analysis["sha"], model_version=model_version())
+            return result
+        current = CACHE.get_or_set(f"explanation:{key}", 30, create)  # single-flight: double clicks make one call
+    return {"explanation": current, "llm_available": llm_available(), "llm_provider": _llm_label(), "stored": current.get("source") == "llm"}
 
 
 def _analyze_issue(owner: str, repo: str, issue: Mapping[str, Any], profile_data: Mapping[str, Any] | None = None, with_explanation: bool = True) -> dict[str, Any]:
@@ -532,8 +689,6 @@ def _analyze_issue(owner: str, repo: str, issue: Mapping[str, Any], profile_data
     analysis["graph"] = issue_view(graph, files, metrics)
     analysis["architecture_highlight"] = [{"path": f["path"], "rank": f["rank"], "relative_confidence": f["relative_confidence"]} for f in files[:5]]
     analysis["tree"] = file_tree(snapshot["files"], files[:10])
-    if with_explanation:
-        analysis["explanation"] = explain(issue, analysis, profile.to_public() if profile else None)
     analysis["model_card"] = model_card_summary()
     return analysis
 
@@ -558,27 +713,180 @@ def ranked_issues(owner: str, repo: str, profile_data: Mapping[str, Any] | None 
 FEEDBACK_WEIGHT = 0.12
 
 
+BATCH_SIZES = (40, 60)
+
+
+def issue_version(issue: Mapping[str, Any]) -> str:
+    """Changes only when the text the models read changes (title, body, labels), not on every new comment."""
+    import hashlib
+    import json
+
+    payload = json.dumps([issue.get("title") or "", issue.get("body") or "", sorted(map(str, issue.get("labels") or []))], ensure_ascii=False)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _prediction_key(full: str, issue: Mapping[str, Any], sha: str) -> str:
+    return f"{full.lower()}#{int(issue['number'])}:{issue_version(issue)}:{sha}:{model_version()}"
+
+
+def _latest_key(full: str, issue: Mapping[str, Any]) -> str:
+    """Most recent prediction for this issue content and model, whatever the commit (used while refreshing)."""
+    return f"{full.lower()}#{int(issue['number'])}:{issue_version(issue)}:latest:{model_version()}"
+
+
+def _compute_predictions(full: str, context: Mapping[str, Any], issues: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Run the models for ``issues`` at the context's commit and store the results (exact and latest keys)."""
+    from . import store
+
+    sha = context["snapshot"]["sha"]
+    texts = [f"{i['title']}\n{i.get('body') or ''}".strip() for i in issues]
+    embeddings = embed(texts, cache=False)
+    localized = _localize_many(full, context, issues, embeddings, top_k=5)
+    estimates = _difficulty_batch(issues, embeddings, [signals for _, signals in localized])
+    actionability = models().actionability.predict(issues) if models().actionability is not None else None
+    fresh: dict[str, dict[str, Any]] = {}
+    latest: dict[str, dict[str, Any]] = {}
+    for position, issue in enumerate(issues):
+        files, signals = localized[position]
+        value = {
+            "embedding": [round(float(number), 6) for number in embeddings[position]],
+            "files": files, "signals": signals, "estimate": estimates[position],
+            "actionability": float(actionability[position]) if actionability is not None else None,
+            "sha": sha,
+        }
+        fresh[_prediction_key(full, issue, sha)] = value
+        latest[_latest_key(full, issue)] = value
+    meta = {"repository": full.lower(), "sha": sha, "model_version": model_version()}
+    store.put_many("issue_predictions", fresh, {key: meta for key in fresh})
+    store.put_many("issue_predictions", latest, {key: meta for key in latest})
+    return fresh
+
+
+_REFRESHING: set[str] = set()
+_REFRESH_LOCK = threading.Lock()
+
+
+def _refresh_in_background(full: str, context: Mapping[str, Any], issues: Sequence[Mapping[str, Any]], on_done: Callable[[], None]) -> bool:
+    """Recompute predictions for a new commit without blocking the request; one refresh per repository and commit."""
+    key = f"{full.lower()}@{context['snapshot']['sha']}"
+    with _REFRESH_LOCK:
+        if key in _REFRESHING:
+            return True
+        _REFRESHING.add(key)
+
+    def run() -> None:
+        try:
+            _compute_predictions(full, context, issues)
+            on_done()
+        except Exception as error:  # noqa: BLE001 - the stale results stay in place; the next request retries
+            logger.warning("Background prediction refresh for %s failed: %s", key, error)
+        finally:
+            with _REFRESH_LOCK:
+                _REFRESHING.discard(key)
+
+    threading.Thread(target=run, name=f"refresh-{key}", daemon=True).start()
+    return True
+
+
+def _issue_predictions(full: str, context: Mapping[str, Any], issues: Sequence[Mapping[str, Any]], allow_stale: bool = False, on_refreshed: Callable[[], None] | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Per-issue model outputs (embedding, top files, difficulty, actionability), computed only for new or edited issues.
+
+    Keyed by repository, issue number, issue content, commit and model version, so a ranking for a
+    different page size, profile or mode, or after a restart (via the store), reuses earlier work.
+
+    With ``allow_stale``, issues whose text is unchanged but whose stored prediction is from an earlier commit
+    are served from that prediction at once while the new commit is computed in the background (active
+    repositories get new commits between visits). New or edited issues are always computed before returning.
+    Returns the predictions and ``{"stale": n, "refreshing": bool, "commits": [...]}``.
+    """
+    from . import store
+
+    sha = context["snapshot"]["sha"]
+    keys = [_prediction_key(full, issue, sha) for issue in issues]
+    found = store.get_many("issue_predictions", keys)
+    missing = [index for index, key in enumerate(keys) if key not in found]
+    status: dict[str, Any] = {"stale": 0, "refreshing": False}
+    if missing and allow_stale:
+        latest_keys = {index: _latest_key(full, issues[index]) for index in missing}
+        latest = store.get_many("issue_predictions", latest_keys.values())
+        stale = [index for index in missing if latest_keys[index] in latest]
+        for index in stale:
+            found[keys[index]] = latest[latest_keys[index]]
+        if stale:
+            status = {"stale": len(stale), "refreshing": _refresh_in_background(full, context, [issues[index] for index in stale], on_refreshed or (lambda: None))}
+        missing = [index for index in missing if index not in stale]
+    if missing:
+        found.update(_compute_predictions(full, context, [issues[index] for index in missing]))
+    return [found[key] for key in keys], status
+
+
 def _issue_batch(owner: str, repo: str, limit: int) -> dict[str, Any]:
-    """The expensive, profile-independent part of ranking (embeddings, localization, difficulty), cached per repository."""
+    """The expensive, profile-independent part of ranking for the most recently updated open issues.
+
+    Computed once for the largest page size (40, or 60 when asked) and sliced for smaller pages, so the
+    dashboard (20), visualizer (30), explorer (40) and For You (15) share one computation.
+    """
+    size = next(value for value in BATCH_SIZES if limit <= value) if limit <= BATCH_SIZES[-1] else limit
+    batch_key = f"issue-batch:{owner}/{repo}:{size}".lower()
+
+    def refreshed() -> None:
+        # Fresh predictions for the new commit are stored: drop the batch and rankings built from stale ones.
+        prefix = f"ranked:{owner}/{repo}:".lower()
+        with CACHE._lock:
+            for key in [key for key in CACHE._data if key == batch_key or key.startswith(prefix)]:
+                CACHE._data.pop(key, None)
+
     def load() -> dict[str, Any]:
+        from concurrent.futures import ThreadPoolExecutor
+
         full = f"{owner}/{repo}"
-        issues = list_issues(owner, repo, limit=limit)
+        # The GitHub issue list and the repository snapshot are independent: fetch them at the same time.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            context_future = pool.submit(repository_context, owner, repo)
+            issues = list_issues(owner, repo, limit=size)
+            context = context_future.result()
         if not issues:
-            return {"issues": []}
-        context = repository_context(owner, repo)
-        texts = [f"{i['title']}\n{i.get('body') or ''}".strip() for i in issues]
-        embeddings = embed(texts, cache=False)
-        localized = _localize_many(full, context, issues, embeddings, top_k=5)
+            return {"issues": [], "refresh": {"stale": 0, "refreshing": False}}
+        predictions, refresh = _issue_predictions(full, context, issues, allow_stale=True, on_refreshed=refreshed)
+        actionability = [item["actionability"] for item in predictions]
         return {
             "issues": issues,
-            "embeddings": embeddings,
-            "localized": localized,
-            "estimates": _difficulty_batch(issues, embeddings, [signals for _, signals in localized]),
-            "actionability": models().actionability.predict(issues) if models().actionability is not None else None,
+            "embeddings": np.asarray([item["embedding"] for item in predictions], dtype="float32"),
+            "localized": [(item["files"], item["signals"]) for item in predictions],
+            "estimates": [item["estimate"] for item in predictions],
+            "actionability": None if any(value is None for value in actionability) else np.asarray(actionability),
             "repo_skills": {skill["id"]: {"weight": skill["weight"], "evidence": skill["evidence"]} for skill in context["snapshot"]["skills"]},
+            "refresh": {**refresh, "sha": context["snapshot"]["sha"]},
         }
 
-    return CACHE.get_or_set(f"issue-batch:{owner}/{repo}:{limit}".lower(), 300, load)
+    batch = CACHE.get_or_set(batch_key, 300, load)
+    if not batch["issues"] or len(batch["issues"]) <= limit:
+        return batch
+    # Same order as list_issues (most recently updated first), so a slice equals ranking the first `limit` issues.
+    return {
+        **batch,
+        "issues": batch["issues"][:limit],
+        "embeddings": batch["embeddings"][:limit],
+        "localized": batch["localized"][:limit],
+        "estimates": batch["estimates"][:limit],
+        "actionability": batch["actionability"][:limit] if batch["actionability"] is not None else None,
+    }
+
+
+@lru_cache(maxsize=4096)
+def _issue_skills_cached(title: str, body: str, labels: tuple[str, ...], files: tuple[str, ...], repo_skills_json: str) -> dict[str, dict[str, Any]]:
+    import json
+
+    return extract_issue_skills(title, body, list(labels), list(files), json.loads(repo_skills_json))
+
+
+def _issue_skills(issue: Mapping[str, Any], files: Sequence[str], repo_skills: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Skills an issue needs; memoised because rankings for other modes, profiles and pages reuse them."""
+    import copy
+    import json
+
+    result = _issue_skills_cached(issue["title"], issue.get("body") or "", tuple(map(str, issue.get("labels") or [])), tuple(files), json.dumps(repo_skills, sort_keys=True, default=str))
+    return copy.deepcopy(result)
 
 
 def _ranked_issues(owner: str, repo: str, profile_data: Mapping[str, Any] | None = None, mode: str = "balanced", limit: int = 30, user: str | None = None) -> dict[str, Any]:
@@ -593,7 +901,7 @@ def _ranked_issues(owner: str, repo: str, profile_data: Mapping[str, Any] | None
     interest = _interest_embedding(tuple(profile.interests)) if profile else None
     analyses, extras, personal_details = [], [], []
     for issue, estimate, query, (files, _) in zip(issues, estimates, embeddings, localized):
-        issue_skills = extract_issue_skills(issue["title"], issue.get("body") or "", issue.get("labels") or [], [f["path"] for f in files], repo_skills)
+        issue_skills = _issue_skills(issue, [f["path"] for f in files], repo_skills)
         analyses.append({**estimate, "files": files, "skills": as_public(issue_skills, limit=6)})
         if profile is not None:
             details = personal_components(profile, issue_skills, estimate["difficulty_distribution"], query, interest, _success(profile, issue, (profile_data or {}).get("history")))
@@ -648,7 +956,9 @@ def _ranked_issues(owner: str, repo: str, profile_data: Mapping[str, Any] | None
     for rank, entry in enumerate(output, 1):
         entry["rank"] = rank
     return {"repository": full, "personalized": profile is not None, "mode": mode, "weights": weights, "issues": output,
-            "hidden": [{"number": e["issue"]["number"], "title": e["issue"]["title"]} for e in hidden], "uses_feedback": "feedback" in weights}
+            "hidden": [{"number": e["issue"]["number"], "title": e["issue"]["title"]} for e in hidden], "uses_feedback": "feedback" in weights,
+            # Non-zero "stale" means some scores come from the previous commit while the new one is computed.
+            "refresh": batch.get("refresh") or {"stale": 0, "refreshing": False}}
 
 
 def learning_opportunities(owner: str, repo: str, profile_data: Mapping[str, Any], limit: int = 10) -> dict[str, Any]:
@@ -773,14 +1083,41 @@ def model_card_summary() -> dict[str, Any]:
 def health() -> dict[str, Any]:
     client = github()
     token = "missing" if not client.token else ("rejected" if not client.authenticated else "configured")
-    status = {"artifacts": str(ARTIFACTS), "github_token": token, "github_quota": client.quota, "read_code": READ_CODE, "llm_configured": bool(os.getenv("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_AUTH_TOKEN"))}
+    status = {"artifacts": str(ARTIFACTS), "github_token": token, "github_quota": client.quota, "read_code": READ_CODE, "llm_configured": llm_available(), "llm_provider": _llm_label()}
     try:
         models()
         status["models_loaded"] = True
+        status["model_version"] = model_version()
     except Exception as error:
         status["models_loaded"] = False
         status["error"] = str(error)
+    from . import store
+
+    status["store"] = store.current().health()
     return status
+
+
+# ---------------------------------------------------------------------------
+# Contributor profiles (persisted so they follow a signed-in user across browsers)
+# ---------------------------------------------------------------------------
+def store_name() -> str:
+    from . import store
+
+    return store.current().name
+
+
+def load_profile(user: str) -> dict[str, Any] | None:
+    from . import store
+
+    return store.get("user_profiles", user.lower())
+
+
+def save_profile(user: str, profile: Mapping[str, Any]) -> dict[str, Any]:
+    from . import store
+
+    value = {**dict(profile), "updated_at": time.time()}
+    store.put("user_profiles", user.lower(), value)
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -798,8 +1135,12 @@ def _map_pull(pull: Mapping[str, Any]) -> dict[str, Any]:
 def _closed_items(owner: str, repo: str) -> dict[str, Any]:
     """The 100 most recently updated closed issues and pull requests (two requests, cached 30 minutes)."""
     def load() -> dict[str, Any]:
-        raw_issues = github().get(f"/repos/{owner}/{repo}/issues", state="closed", per_page=100, sort="updated", direction="desc")
-        raw_pulls = github().get(f"/repos/{owner}/{repo}/pulls", state="closed", per_page=100, sort="updated", direction="desc")
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=2) as pool:  # independent requests
+            issues_future = pool.submit(github().get, f"/repos/{owner}/{repo}/issues", state="closed", per_page=100, sort="updated", direction="desc")
+            pulls_future = pool.submit(github().get, f"/repos/{owner}/{repo}/pulls", state="closed", per_page=100, sort="updated", direction="desc")
+            raw_issues, raw_pulls = issues_future.result(), pulls_future.result()
         issues = [{**_map_issue(item), "closed_at": item.get("closed_at"), "state_reason": item.get("state_reason")} for item in raw_issues if "pull_request" not in item]
         pulls = [_map_pull(item) for item in raw_pulls]
         return {"issues": issues, "pulls": pulls, "fetched_at": time.time()}
@@ -830,37 +1171,65 @@ def _pull_files(owner: str, repo: str, number: int) -> list[dict[str, Any]]:
     return CACHE.get_or_set(f"pull-files:{owner}/{repo}#{number}".lower(), 86400, load)
 
 
+def _similar_items(owner: str, repo: str, issue: Mapping[str, Any], k: int) -> dict[str, Any]:
+    """Retrieval plus the changed files of the matching PRs; stored for 6 hours per issue version."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from . import store
+    from .history import history_text
+
+    key = f"{owner}/{repo}".lower() + f"#{issue.get('number')}:{issue_version(issue)}:k{k}"
+
+    def load() -> dict[str, Any]:
+        stored = store.get("similar_issues", key)
+        if stored is not None:
+            return stored
+        index = _history_index(owner, repo)
+        text = history_text(issue["title"], issue.get("body") or "")
+        query = embed([text], cache=False)[0]
+        exclude = [position for position, record in enumerate(index["records"]) if record["kind"] == "issue" and record["number"] == issue.get("number")]
+        similar = []
+        for position, score in index["retriever"].top(text, query, k=k, exclude=exclude):
+            record = index["records"][position]
+            item = {name: record[name] for name in ("kind", "number", "title", "closed_at", "html_url", "labels", "pull_requests")}
+            similar.append({**item, "similarity": round(score, 3), "changed_files": []})
+        budget = 5 if github().authenticated else 3  # PR file lookups cost one request each
+        targets = [item for item in similar if item["pull_requests"]][:budget]
+
+        def files_of(item: dict[str, Any]) -> None:
+            number = item["pull_requests"][0]["number"]
+            try:
+                files = _pull_files(owner, repo, number)
+            except GitHubError as error:
+                logger.info("PR files unavailable for %s/%s#%s: %s", owner, repo, number, error)
+                return
+            item["changed_files"] = [f["path"] for f in files]
+            item["change_size"] = {"files": len(files), "additions": sum(f["additions"] for f in files), "deletions": sum(f["deletions"] for f in files)}
+
+        with ThreadPoolExecutor(max_workers=5) as pool:  # independent requests: fetch them together
+            list(pool.map(files_of, targets))
+        result = {"searched": len(index["records"]), "similar": similar}
+        store.put("similar_issues", key, result, repository=f"{owner}/{repo}".lower())
+        return result
+
+    return CACHE.get_or_set(f"similar:{key}", 1800, load)
+
+
 def similar_history(owner: str, repo: str, issue: Mapping[str, Any], k: int = 5, predicted: Sequence[str] = ()) -> dict[str, Any]:
     """Past issues and merged PRs most similar to ``issue``, with the files their fixes changed."""
-    from .history import changed_file_votes, history_text
+    import copy
 
-    index = _history_index(owner, repo)
-    text = history_text(issue["title"], issue.get("body") or "")
-    query = embed([text], cache=False)[0]
-    exclude = [position for position, record in enumerate(index["records"]) if record["kind"] == "issue" and record["number"] == issue.get("number")]
-    similar = []
-    budget = 5 if github().authenticated else 3  # PR file lookups cost one request each
-    for position, score in index["retriever"].top(text, query, k=k, exclude=exclude):
-        record = index["records"][position]
-        item = {key: record[key] for key in ("kind", "number", "title", "closed_at", "html_url", "labels", "pull_requests")}
-        item["similarity"] = round(score, 3)
-        item["changed_files"] = []
-        if record["pull_requests"] and budget > 0:
-            budget -= 1
-            try:
-                files = _pull_files(owner, repo, record["pull_requests"][0]["number"])
-                item["changed_files"] = [f["path"] for f in files]
-                item["change_size"] = {"files": len(files), "additions": sum(f["additions"] for f in files), "deletions": sum(f["deletions"] for f in files)}
-            except GitHubError as error:
-                logger.info("PR files unavailable for %s/%s#%s: %s", owner, repo, record["pull_requests"][0]["number"], error)
-        similar.append(item)
+    from .history import changed_file_votes
+
+    found = _similar_items(owner, repo, issue, k)
+    similar = copy.deepcopy(found["similar"])
     votes = changed_file_votes(similar)
     predicted_set = set(predicted)
     for vote in votes:
         vote["also_predicted"] = vote["path"] in predicted_set
     return {
         "repository": f"{owner}/{repo}",
-        "searched": len(index["records"]),
+        "searched": found["searched"],
         "similar": similar,
         "historical_files": votes,
         "agreement": sum(1 for vote in votes[:10] if vote["also_predicted"]),
@@ -964,10 +1333,16 @@ def repository_activity(owner: str, repo: str, days: int = 90) -> dict[str, Any]
     def load() -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         since = now - timedelta(days=days)
-        commits = github().get(f"/repos/{owner}/{repo}/commits", since=since.isoformat(), per_page=100)
-        contributors = github().get(f"/repos/{owner}/{repo}/contributors", per_page=30)
-        closed = _closed_items(owner, repo)
-        open_issues = list_issues(owner, repo, limit=40)
+        from concurrent.futures import ThreadPoolExecutor
+
+        # Five independent GitHub requests (some shared with other pages through the cache): run them together.
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            commits_future = pool.submit(github().get, f"/repos/{owner}/{repo}/commits", since=since.isoformat(), per_page=100)
+            contributors_future = pool.submit(github().get, f"/repos/{owner}/{repo}/contributors", per_page=30)
+            closed_future = pool.submit(_closed_items, owner, repo)
+            open_future = pool.submit(list_issues, owner, repo, 40)
+            meta_future = pool.submit(_repo_meta, owner, repo)
+            commits, contributors, closed, open_issues, meta = (future.result() for future in (commits_future, contributors_future, closed_future, open_future, meta_future))
 
         weeks = [0] * (days // 7 + 1)
         authors: Counter = Counter()
@@ -994,7 +1369,7 @@ def repository_activity(owner: str, repo: str, days: int = 90) -> dict[str, Any]
         unanswered = sum(1 for i in open_issues if not i.get("comments"))
         newcomer = sum(1 for i in open_issues if any(_NEWCOMER_LABEL.search(label or "") for label in i.get("labels") or []))
 
-        pushed = _parse_time(_repo_meta(owner, repo).get("pushed_at"))
+        pushed = _parse_time(meta.get("pushed_at"))
         median_merge = _median(merge_days)
         components = {
             "activity": min(1.0, len(commits) / 60.0),

@@ -6,7 +6,6 @@ import HowItWorks from './pages/HowItWorks'
 import IssueAnalysis from './pages/IssueAnalysis'
 import IssueExplorer from './pages/IssueExplorer'
 import KnowledgeGraph from './pages/KnowledgeGraph'
-import ModelCard from './pages/ModelCard'
 import Profile from './pages/Profile'
 import Recommendations from './pages/Recommendations'
 import RepositoryDashboard from './pages/RepositoryDashboard'
@@ -29,7 +28,7 @@ export default function App() {
       <Route path="/sign-in" element={<SignIn />} />
       <Route path="/profile" element={<Profile />} />
       <Route path="/recommendations" element={<Recommendations />} />
-      <Route path="/model-card" element={<ModelCard />} />
+      <Route path="/model-card" element={<Navigate to="/how-it-works" replace />} />
       <Route path="/contributors/:login" element={<Contributor />} />
       <Route path="/repository/:owner/:repo" element={<RepositoryDashboard />} />
       <Route path="/repository/:owner/:repo/issues" element={<IssueExplorer />} />

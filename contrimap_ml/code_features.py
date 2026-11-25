@@ -28,7 +28,7 @@ import math
 import re
 from collections import Counter
 from functools import lru_cache
-from typing import Mapping, Sequence
+from typing import NamedTuple, Mapping, Sequence
 
 import numpy as np
 
@@ -89,21 +89,46 @@ def issue_strings(text: str) -> list[str]:
     return [value for value in found if len(value) >= 8 and " " in value and "/" not in value][:40]
 
 
+class _ContentIndex(NamedTuple):
+    """Everything code_features needs from one file, computed once per distinct content."""
+
+    defs: frozenset
+    tokens: tuple
+    lines: int
+    identifiers: frozenset
+    lowered: str
+    counter: Counter
+    def_counter: Counter
+    length: int
+    def_length: int
+
+
 @lru_cache(maxsize=4096)
-def _content_summary(content: str) -> tuple[frozenset[str], tuple[str, ...], int]:
+def _content_index(content: str) -> _ContentIndex:
+    head = content[:200_000]
     defs = frozenset(definitions(content))
-    tokens = tuple(token for word in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", content[:200_000]) for token in split_identifier(word) if len(token) > 1)
-    return defs, tokens, content.count("\n") + 1
+    words = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", head)
+    tokens = tuple(token for word in words for token in split_identifier(word) if len(token) > 1)
+    def_tokens = [token for name in defs for token in split_identifier(name)]
+    return _ContentIndex(defs, tokens, content.count("\n") + 1, frozenset(words), head.lower(), Counter(tokens), Counter(def_tokens), len(tokens), len(def_tokens))
 
 
-def _bm25(query: Counter[str], documents: Sequence[Sequence[str]]) -> np.ndarray:
-    n = len(documents)
+_EMPTY = _ContentIndex(frozenset(), (), 0, frozenset(), "", Counter(), Counter(), 0, 0)
+
+
+def _content_summary(content: str) -> tuple[frozenset[str], tuple[str, ...], int]:
+    index = _content_index(content)
+    return index.defs, index.tokens, index.lines
+
+
+def _bm25(query: Counter[str], documents: Sequence[Sequence[str]], counters: Sequence[Counter] | None = None, lengths: Sequence[int] | None = None) -> np.ndarray:
+    n = len(documents) if counters is None else len(counters)
     scores = np.zeros(n, dtype="float32")
     if not n or not query:
         return scores
-    lengths = np.asarray([len(doc) for doc in documents], dtype="float32")
+    lengths = np.asarray([len(doc) for doc in documents] if lengths is None else lengths, dtype="float32")
     average = float(lengths.mean()) or 1.0
-    counters = [Counter(doc) for doc in documents]
+    counters = [Counter(doc) for doc in documents] if counters is None else counters
     for token, query_tf in query.items():
         df = sum(1 for counter in counters if token in counter)
         if not df:
@@ -129,38 +154,30 @@ def code_features(text: str, candidates: Sequence[str], contents: Mapping[str, s
     strings = [value.lower() for value in issue_strings(text)]
     query = Counter(text_tokens(text))
 
-    summaries = []
-    for path in candidates:
-        content = contents.get(path)
-        summaries.append(_content_summary(content) if content else (frozenset(), (), 0))
+    indexes = [_content_index(contents[path]) if contents.get(path) else _EMPTY for path in candidates]
     # How many shortlisted files define each symbol: a name defined everywhere (``__init__``, ``get``) is weak evidence.
     define_count: Counter[str] = Counter()
-    for defs, _, _ in summaries:
-        define_count.update(name.lower() for name in defs if name.lower() in lowered_symbols)
+    for index in indexes:
+        define_count.update(name.lower() for name in index.defs if name.lower() in lowered_symbols)
 
-    for index, path in enumerate(candidates):
-        content = contents.get(path)
-        defs, tokens, lines = summaries[index]
-        if not content:
-            matrix[index, column["code_missing"]] = 1.0
+    for row, path in enumerate(candidates):
+        index = indexes[row]
+        if not contents.get(path):
+            matrix[row, column["code_missing"]] = 1.0
             continue
-        lowered_defs = {name.lower() for name in defs}
+        lowered_defs = {name.lower() for name in index.defs}
         hits = [symbol for symbol in lowered_symbols if symbol in lowered_defs]
-        matrix[index, column["code_def_hits"]] = math.log1p(len(hits))
-        matrix[index, column["code_def_idf"]] = sum(math.log(1 + n / define_count[symbol]) for symbol in hits)
-        token_set = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", content[:200_000]))
-        matrix[index, column["code_ref_hits"]] = math.log1p(sum(1 for symbol in symbols if symbol in token_set))
-        lowered_content = content[:200_000].lower()
-        matrix[index, column["code_string_hit"]] = float(sum(1 for value in strings if value in lowered_content))
-        matrix[index, column["code_lines"]] = math.log1p(lines)
-        matrix[index, column["code_n_defs"]] = math.log1p(len(defs))
+        matrix[row, column["code_def_hits"]] = math.log1p(len(hits))
+        matrix[row, column["code_def_idf"]] = sum(math.log(1 + n / define_count[symbol]) for symbol in hits)
+        matrix[row, column["code_ref_hits"]] = math.log1p(sum(1 for symbol in symbols if symbol in index.identifiers))
+        matrix[row, column["code_string_hit"]] = float(sum(1 for value in strings if value in index.lowered))
+        matrix[row, column["code_lines"]] = math.log1p(index.lines)
+        matrix[row, column["code_n_defs"]] = math.log1p(len(index.defs))
 
-    documents = [summary[1] for summary in summaries]
-    bm25 = _bm25(query, documents)
+    bm25 = _bm25(query, (), [index.counter for index in indexes], [index.length for index in indexes])
     matrix[:, column["code_bm25"]] = bm25
     matrix[:, column["code_bm25_rel"]] = bm25 / bm25.max() if bm25.max() > 0 else 0.0
-    def_documents = [[token for name in summary[0] for token in split_identifier(name)] for summary in summaries]
-    matrix[:, column["code_def_bm25"]] = _bm25(query, def_documents)
+    matrix[:, column["code_def_bm25"]] = _bm25(query, (), [index.def_counter for index in indexes], [index.def_length for index in indexes])
     return matrix
 
 

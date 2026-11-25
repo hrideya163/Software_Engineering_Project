@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, NavLink, useLocation } from 'react-router-dom'
 import { useApp } from '../context/AppContext'
 
-export const NAV_LINKS = [['Explore', '/', true], ['For You', '/recommendations'], ['Profile', '/profile'], ['Model Card', '/model-card'], ['How It Works', '/how-it-works']]
+export const NAV_LINKS = [['Explore', '/', true], ['For You', '/recommendations'], ['Profile', '/profile'], ['How It Works', '/how-it-works']]
 const PROVIDER_NAMES = { github: 'GitHub', google: 'Google' }
 
 export function Avatar({ user, size = 32 }) {

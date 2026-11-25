@@ -1,5 +1,5 @@
 import { Search, UserRound } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { getRankedIssues } from '../api/contrimapApi'
 import AppLayout from '../components/AppLayout'
@@ -8,7 +8,8 @@ import ErrorMessage from '../components/ErrorMessage'
 import Loading from '../components/Loading'
 import RankedIssueCard from '../components/RankedIssueCard'
 import { useAsync, useProfile } from '../hooks/useProfile'
-import RepositoryGate from '../components/RepositoryGate'
+import { PreparationProgress } from '../components/RepositoryGate'
+import { useRepositoryPreparation } from '../hooks/useRepositoryPreparation'
 
 const MODES = [['balanced', 'Balanced'], ['learning', 'Learn something new'], ['quick_win', 'Quick win']]
 
@@ -20,7 +21,29 @@ function IssueExplorerContent() {
   const [query, setQuery] = useState('')
   const [difficulty, setDifficulty] = useState('All')
   const [savedOnly, setSavedOnly] = useState(false)
-  const { data, loading, error, retry } = useAsync(() => getRankedIssues(owner, repo, { profile: personal ? profile : null, mode, limit: 40 }), [owner, repo, personal, mode])
+  const preparation = useRepositoryPreparation(owner, repo)
+  const { data: loaded, loading, error, retry } = useAsync(() => getRankedIssues(owner, repo, { profile: personal ? profile : null, mode, limit: 40 }), [owner, repo, personal, mode])
+  // When the repository has a new commit, the server answers at once with scores from the previous commit and
+  // recomputes in the background; this quietly picks up the new scores when they are ready.
+  const [updated, setUpdated] = useState(null)
+  useEffect(() => setUpdated(null), [loaded])
+  const data = updated || loaded
+  const refreshing = Boolean(data?.refresh?.refreshing)
+  useEffect(() => {
+    if (!refreshing) return
+    let active = true
+    let attempts = 0
+    let timer = null
+    const check = () => getRankedIssues(owner, repo, { profile: personal ? profile : null, mode, limit: 40, fresh: true })
+      .then(next => {
+        if (!active) return
+        if (!next.refresh?.refreshing) setUpdated(next)
+        else if (++attempts < 20) timer = setTimeout(check, 4000)
+      })
+      .catch(() => {})
+    timer = setTimeout(check, 4000)
+    return () => { active = false; clearTimeout(timer) }
+  }, [refreshing, loaded]) // eslint-disable-line react-hooks/exhaustive-deps
   const filtered = useMemo(() => (data?.issues || []).filter(item => (difficulty === 'All' || item.difficulty === difficulty) && (!savedOnly || item.feedback?.saved) && `${item.issue.title} ${item.summary} ${(item.issue.labels || []).join(' ')}`.toLowerCase().includes(query.toLowerCase())), [data, query, difficulty, savedOnly])
   return <AppLayout>
     <p className="eyebrow">Issue discovery</p>
@@ -34,18 +57,20 @@ function IssueExplorerContent() {
         : <Link to="/profile" className="btn-secondary"><UserRound size={16} />Set up profile</Link>}
       {personal && <select value={mode} onChange={event => setMode(event.target.value)} className="rounded-xl border border-slate-200 px-3 py-3 text-sm font-bold">{MODES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>}
     </div>
-    {loading && <Loading label="Scoring issues…" />}
+    {loading && !data && !error && (!preparation.ready && preparation.status && !preparation.error
+      ? <PreparationProgress owner={owner} repo={repo} status={preparation.status} />
+      : <Loading label="Scoring issues…" />)}
     {error && <div className="mt-4"><ErrorMessage message={error} onRetry={retry} /></div>}
-    {!loading && data && <>
-      <p className="mt-6 text-sm font-semibold text-slate-500">{filtered.length} of {data.issues.length} issues{data.hidden?.length ? ` · ${data.hidden.length} hidden as not for you` : ''}{data.uses_feedback ? ' · ranking adapts to issues you saved and opened' : ''}</p>
+    {data && <div className={loading ? 'pointer-events-none opacity-60 transition-opacity' : 'transition-opacity'} aria-busy={loading}>
+      <p className="mt-6 text-sm font-semibold text-slate-500">{loading && <span className="mr-2 text-blue-700">Updating…</span>}{refreshing && !loading && <span className="mr-2 text-blue-700" title="The repository has new commits; scores for unchanged issues come from the previous commit until the new ones are ready.">Updating scores for the latest commit…</span>}{filtered.length} of {data.issues.length} issues{data.hidden?.length ? ` · ${data.hidden.length} hidden as not for you` : ''}{data.uses_feedback ? ' · ranking adapts to issues you saved and opened' : ''}</p>
       <div className="mt-4 grid gap-4 md:grid-cols-2 2xl:grid-cols-3">{filtered.map(item => <RankedIssueCard item={item} owner={owner} repo={repo} weights={data.weights} key={item.issue.number} />)}</div>
       {!filtered.length && <div className="mt-4"><EmptyState message="No issues match your filters." /></div>}
-    </>}
+    </div>}
   </AppLayout>
 }
 
-// The page renders once the backend has snapshotted the repository; until then the gate shows build progress.
+// No preparation gate: ranking starts immediately (the server waits for the repository snapshot itself), and
+// the preparation progress is shown in the list area while it runs.
 export default function IssueExplorer() {
-  const { owner, repo } = useParams()
-  return <RepositoryGate owner={owner} repo={repo}><IssueExplorerContent /></RepositoryGate>
+  return <IssueExplorerContent />
 }

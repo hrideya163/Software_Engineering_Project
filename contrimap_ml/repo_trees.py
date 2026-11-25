@@ -14,7 +14,9 @@ import logging
 import os
 import re
 import subprocess
+import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterable
@@ -102,15 +104,34 @@ def _parse_batch(stream: bytes) -> dict[str, bytes]:
     return blobs
 
 
-def _blob_ids(bare: Path, sha: str, wanted: set[str]) -> dict[str, str]:
+_LISTINGS: "OrderedDict[tuple[str, str], dict[str, str]]" = OrderedDict()
+_LISTINGS_LOCK = threading.Lock()
+
+
+def _tree_listing(bare: Path, sha: str) -> dict[str, str]:
+    """``{path: blob id}`` for a commit; a commit's tree never changes, so it is listed once per process."""
+    key = (str(bare), sha)
+    with _LISTINGS_LOCK:
+        if key in _LISTINGS:
+            _LISTINGS.move_to_end(key)
+            return _LISTINGS[key]
     listing: dict[str, str] = {}
     # Note: `ls-tree -l` would make git lazily download every blob just to report sizes.
     for line in _git(["ls-tree", "-r", sha], bare).splitlines():
         meta, _, path = line.partition("\t")
         parts = meta.split()
-        if path in wanted and len(parts) == 3 and parts[1] == "blob":
+        if len(parts) == 3 and parts[1] == "blob":
             listing[path] = parts[2]
+    with _LISTINGS_LOCK:
+        _LISTINGS[key] = listing
+        while len(_LISTINGS) > 64:
+            _LISTINGS.popitem(last=False)
     return listing
+
+
+def _blob_ids(bare: Path, sha: str, wanted: set[str]) -> dict[str, str]:
+    listing = _tree_listing(bare, sha)
+    return {path: listing[path] for path in wanted if path in listing}
 
 
 def _download_missing(bare: Path, oids: Iterable[str], max_file_size: int, chunk: int = 200) -> None:

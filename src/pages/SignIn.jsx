@@ -1,8 +1,7 @@
-import { Bookmark, CheckCircle2, Github, Info, ShieldCheck, UserRound } from 'lucide-react'
+import { Bookmark, Github, Info, ShieldCheck, UserRound } from 'lucide-react'
 import { Link, Navigate, useSearchParams } from 'react-router-dom'
 import { signIn } from '../api/authApi'
 import Loading from '../components/Loading'
-import { Avatar } from '../components/Navbar'
 import Page from '../components/Page'
 import { useApp } from '../context/AppContext'
 
@@ -46,10 +45,4 @@ export default function SignIn() {
       <Link to={next} className="mt-6 inline-flex text-sm font-bold text-blue-700 hover:underline">Continue without signing in</Link>
     </div>
   </Page>
-}
-
-export function SignedInBadge() {
-  const { auth } = useApp()
-  if (auth.status !== 'signed-in') return null
-  return <span className="inline-flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1 text-xs font-bold text-emerald-700"><Avatar user={auth.user} size={18} /><CheckCircle2 size={13} />Signed in as {auth.user.login}</span>
 }

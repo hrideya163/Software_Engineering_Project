@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -27,10 +28,42 @@ from .skills import as_public, skills_from_text  # noqa: E402
 
 NAME = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 
-app = FastAPI(title="ContriMap API", version="2.0.0")
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Load the trained models and the sentence embedder in the background at startup, so the first ranking
+    request does not pay the ~15 s embedder load. Requests that arrive earlier still work (they wait)."""
+    if os.getenv("CONTRIMAP_WARMUP", "1") != "0":
+        import threading
+
+        def run() -> None:
+            try:
+                from .textfeat import embed
+
+                service.models()
+                embed(["warm up"], cache=False)
+            except Exception:  # noqa: BLE001 - warm-up is best effort
+                pass
+
+        threading.Thread(target=run, name="contrimap-warmup", daemon=True).start()
+    yield
+
+
+app = FastAPI(title="ContriMap API", version="2.0.0", lifespan=lifespan)
 origins = [origin.strip() for origin in os.getenv("CONTRIMAP_ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if origin.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["GET", "POST"], allow_headers=["Content-Type"])
 app.include_router(auth.router)
+
+
+@app.middleware("http")
+async def server_timing(request: Request, call_next):
+    """Report server time per request (Server-Timing), so browser traces separate server work from waiting."""
+    import time as _time
+
+    start = _time.perf_counter()
+    response = await call_next(request)
+    response.headers["Server-Timing"] = f"app;dur={(_time.perf_counter() - start) * 1000:.1f}"
+    response.headers["Timing-Allow-Origin"] = "*"
+    return response
 
 
 @app.exception_handler(service.GitHubError)
@@ -84,6 +117,15 @@ class AnalyzeRequest(BaseModel):
     issue: IssueInput | None = None
     profile: Profile | None = None
     explain: bool = True
+
+
+class ExplanationRequest(BaseModel):
+    profile: Profile | None = None
+    generate: bool = False  # True only when the user asks for a Claude-written explanation
+
+
+class ProfileSaveRequest(BaseModel):
+    profile: Profile
 
 
 class RecommendationRequest(BaseModel):
@@ -158,16 +200,34 @@ def learning(owner: str, repo: str, request: ProfileRequest) -> dict[str, Any]:
     return service.learning_opportunities(*_repo(owner, repo), _profile(request.profile))
 
 
+def _issue_and_context(owner: str, repo: str, number: int) -> dict[str, Any]:
+    """Fetch the issue from GitHub while the repository context (snapshot, graph) loads: the two are independent."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        context = pool.submit(service.repository_context, owner, repo)
+        issue = service.get_issue(owner, repo, number)
+        context.result()
+    return issue
+
+
+@app.get("/api/repos/{owner}/{repo}/issues/{number}")
+def issue_details(owner: str, repo: str, number: int) -> dict[str, Any]:
+    """Just the issue (title, labels, author...), so the page can show it before the analysis is ready."""
+    owner, repo = _repo(owner, repo)
+    return {"repository": f"{owner}/{repo}", "issue": service.get_issue(owner, repo, number)}
+
+
 @app.get("/api/repos/{owner}/{repo}/issues/{number}/analysis")
 def issue_analysis(owner: str, repo: str, number: int) -> dict[str, Any]:
     owner, repo = _repo(owner, repo)
-    return service.analyze_issue(owner, repo, service.get_issue(owner, repo, number))
+    return service.analyze_issue(owner, repo, _issue_and_context(owner, repo, number))
 
 
 @app.post("/api/repos/{owner}/{repo}/issues/{number}/analysis")
 def issue_analysis_personal(owner: str, repo: str, number: int, request: AnalyzeRequest) -> dict[str, Any]:
     owner, repo = _repo(owner, repo)
-    issue = request.issue.model_dump() if request.issue else service.get_issue(owner, repo, number)
+    issue = request.issue.model_dump() if request.issue else _issue_and_context(owner, repo, number)
     return service.analyze_issue(owner, repo, issue, _profile(request.profile), request.explain)
 
 
@@ -177,6 +237,34 @@ def analyze_text(owner: str, repo: str, request: AnalyzeRequest) -> dict[str, An
     if request.issue is None:
         raise HTTPException(422, "issue is required.")
     return service.analyze_issue(*_repo(owner, repo), request.issue.model_dump(), _profile(request.profile), request.explain)
+
+
+@app.get("/api/repos/{owner}/{repo}/issues/{number}/explanation")
+def issue_explanation(owner: str, repo: str, number: int) -> dict[str, Any]:
+    """Stored Claude explanation for this analysis if one exists, else the template. Never calls the LLM."""
+    owner, repo = _repo(owner, repo)
+    return service.explanation(owner, repo, service.get_issue(owner, repo, number), None, generate=False)
+
+
+@app.post("/api/repos/{owner}/{repo}/issues/{number}/explanation")
+def issue_explanation_personal(owner: str, repo: str, number: int, request: ExplanationRequest) -> dict[str, Any]:
+    """With ``generate``, writes (and stores) a Claude explanation when an API key is configured."""
+    owner, repo = _repo(owner, repo)
+    return service.explanation(owner, repo, service.get_issue(owner, repo, number), _profile(request.profile), generate=request.generate)
+
+
+@app.get("/api/profiles/{user}")
+def get_profile(user: str) -> dict[str, Any]:
+    if not NAME.match(user):
+        raise HTTPException(422, "Invalid user id.")
+    return {"user": user, "profile": service.load_profile(user)}
+
+
+@app.post("/api/profiles/{user}")
+def save_profile(user: str, request: ProfileSaveRequest) -> dict[str, Any]:
+    if not NAME.match(user):
+        raise HTTPException(422, "Invalid user id.")
+    return {"user": user, "profile": service.save_profile(user, request.profile.model_dump()), "stored": service.store_name()}
 
 
 @app.get("/api/repos/{owner}/{repo}/architecture")
@@ -194,7 +282,7 @@ def similar(owner: str, repo: str, number: int) -> dict[str, Any]:
     owner, repo = _repo(owner, repo)
     issue = service.get_issue(owner, repo, number)
     # Same cache entry as the analysis page, so this is free once the issue has been analysed.
-    predicted = [f["path"] for f in service.analyze_issue(owner, repo, issue)["files"][:10]]
+    predicted = [f["path"] for f in service.analyze_issue(owner, repo, issue, with_explanation=False)["files"][:10]]
     return service.similar_history(owner, repo, issue, predicted=predicted)
 
 
